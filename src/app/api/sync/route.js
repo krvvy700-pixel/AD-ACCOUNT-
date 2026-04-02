@@ -98,7 +98,7 @@ async function syncAccount(supabase, account) {
       campaignMap[dc.external_id] = dc.id;
     }
 
-    // 4. BATCH upsert metrics
+    // 4. INSERT metrics (delete old ones first to avoid unique index issues)
     if (insights.length > 0) {
       const metricRows = insights
         .filter(row => campaignMap[row.campaignId])
@@ -118,14 +118,31 @@ async function syncAccount(supabase, account) {
           synced_at: new Date().toISOString(),
         }));
 
+      console.log(`[sync] ${account.name}: ${insights.length} insight rows, ${metricRows.length} matched campaigns`);
+
+      // Delete existing metrics for this account's campaigns in the date range
+      const campaignDbIds = Object.values(campaignMap);
+      if (campaignDbIds.length > 0) {
+        await supabase
+          .from('metrics')
+          .delete()
+          .eq('entity_type', 'campaign')
+          .in('campaign_id', campaignDbIds)
+          .gte('date', dateFrom)
+          .lte('date', dateTo);
+      }
+
+      // Insert fresh metrics in chunks of 50
       for (let i = 0; i < metricRows.length; i += 50) {
         const chunk = metricRows.slice(i, i + 50);
-        await supabase.from('metrics').upsert(chunk, {
-          onConflict: 'entity_type,date,campaign_id',
-          ignoreDuplicates: false,
-        });
+        const { error: insertErr } = await supabase.from('metrics').insert(chunk);
+        if (insertErr) {
+          console.error(`[sync] Metrics insert error for ${account.name}:`, insertErr);
+        }
       }
       recordCount += metricRows.length;
+    } else {
+      console.log(`[sync] ${account.name}: 0 insights returned`);
     }
 
     // 5. Update status
