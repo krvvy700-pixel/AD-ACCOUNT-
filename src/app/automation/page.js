@@ -1,11 +1,19 @@
 'use client';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import AppShell from '@/components/AppShell';
 import { useCurrency } from '@/context/CurrencyContext';
 import { Zap, Plus, Play, Pause, Edit2, Trash2, Clock, Shield, RotateCcw, X } from 'lucide-react';
 
 export default function AutomationPage() {
+  return (
+    <Suspense fallback={<AppShell title="Automation"><div className="text-center py-12 text-muted-foreground">Loading...</div></AppShell>}>
+      <AutomationContent />
+    </Suspense>
+  );
+}
+
+function AutomationContent() {
   const { formatMoney } = useCurrency();
   const searchParams = useSearchParams();
   const [rules, setRules] = useState([]);
