@@ -405,17 +405,22 @@ export async function fetchAdCreativeMedia(adId, accessToken) {
 
 // --- Helpers ---
 
-// Conversion action types Meta uses
-const CONVERSION_TYPES = [
-  'offsite_conversion',
+// Conversion action types — STRICT priority order.
+// Meta Ads Manager shows "Results" as the FIRST matching type only.
+// We use exact matching (no .includes()) to prevent double-counting.
+const CONVERSION_PRIORITY = [
+  'purchase',
+  'omni_purchase',
   'offsite_conversion.fb_pixel_purchase',
+  'lead',
   'offsite_conversion.fb_pixel_lead',
+  'complete_registration',
   'offsite_conversion.fb_pixel_complete_registration',
+  'add_to_cart',
+  'omni_add_to_cart',
   'offsite_conversion.fb_pixel_add_to_cart',
+  'initiate_checkout',
   'offsite_conversion.fb_pixel_initiate_checkout',
-  'purchase', 'lead', 'complete_registration',
-  'add_to_cart', 'initiate_checkout',
-  'omni_purchase', 'omni_add_to_cart',
   'onsite_conversion.messaging_conversation_started_7d',
   'landing_page_view',
   'link_click',
@@ -423,26 +428,21 @@ const CONVERSION_TYPES = [
 
 function extractConversions(actions) {
   if (!actions || !Array.isArray(actions)) return 0;
-  let total = 0;
-  for (const a of actions) {
-    if (CONVERSION_TYPES.some(t => a.action_type === t || a.action_type?.includes(t))) {
-      total += parseFloat(a.value || '0');
-      break; // take the first matching conversion type only
-    }
+  // Find the highest-priority action type that exists in this row
+  for (const type of CONVERSION_PRIORITY) {
+    const action = actions.find(a => a.action_type === type);
+    if (action) return parseFloat(action.value || '0');
   }
-  return total;
+  return 0;
 }
 
 function extractConversionValue(actionValues) {
   if (!actionValues || !Array.isArray(actionValues)) return 0;
-  let total = 0;
-  for (const a of actionValues) {
-    if (CONVERSION_TYPES.some(t => a.action_type === t || a.action_type?.includes(t))) {
-      total += parseFloat(a.value || '0');
-      break;
-    }
+  for (const type of CONVERSION_PRIORITY) {
+    const action = actionValues.find(a => a.action_type === type);
+    if (action) return parseFloat(action.value || '0');
   }
-  return total;
+  return 0;
 }
 
 function summarizeTargeting(targeting) {
