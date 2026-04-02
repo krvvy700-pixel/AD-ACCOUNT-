@@ -282,7 +282,14 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
                   </select>
                   <input type="number" value={c.value} onChange={e => updateCond(i, 'value', e.target.value)} placeholder="Value" className={`${inputCls} !w-24`} />
                   <select value={c.period} onChange={e => updateCond(i, 'period', e.target.value)} className={`${inputCls} !w-auto`}>
-                    {['today', 'yesterday', 'last_3_days', 'last_7_days', 'last_14_days', 'last_30_days'].map(p => <option key={p} value={p}>{p.replace(/_/g, ' ')}</option>)}
+                    {[
+                      { value: 'today', label: '⚡ Real-time (today)' },
+                      { value: 'yesterday', label: 'Yesterday' },
+                      { value: 'last_3_days', label: 'Avg of last 3 days' },
+                      { value: 'last_7_days', label: 'Avg of last 7 days' },
+                      { value: 'last_14_days', label: 'Avg of last 14 days' },
+                      { value: 'last_30_days', label: 'Avg of last 30 days' },
+                    ].map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
                   </select>
                   {conditions.length > 1 && <button onClick={() => setConditions(conditions.filter((_, j) => j !== i))} className="text-destructive p-1"><X size={14} /></button>}
                 </div>
