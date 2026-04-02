@@ -1,0 +1,17 @@
+import { NextResponse } from 'next/server';
+
+// Initiates Meta OAuth flow — redirects user to Facebook login
+export async function GET() {
+  const appId = process.env.NEXT_PUBLIC_META_APP_ID;
+  const redirectUri = `${process.env.NEXT_PUBLIC_APP_URL}/auth/meta/callback`;
+  const scope = 'ads_read,ads_management,business_management';
+
+  const authUrl =
+    `https://www.facebook.com/v22.0/dialog/oauth?` +
+    `client_id=${appId}` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&scope=${scope}` +
+    `&response_type=code`;
+
+  return NextResponse.redirect(authUrl);
+}
