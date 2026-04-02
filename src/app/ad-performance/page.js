@@ -7,6 +7,7 @@ import { useAuth } from '@/context/AuthContext';
 import {
   Pause, Play, Loader2, Zap, X, Image as ImageIcon,
   Film, Power, PowerOff, Search, ChevronUp, ChevronDown,
+  DollarSign, TrendingUp, Filter,
 } from 'lucide-react';
 import { format, addDays, isSameDay } from 'date-fns';
 import { useRouter } from 'next/navigation';
@@ -37,6 +38,9 @@ export default function AdPerformancePage() {
 
   // Search
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Active-only filter
+  const [activeOnly, setActiveOnly] = useState(false);
 
   // Action state
   const [actionLoading, setActionLoading] = useState({});
@@ -90,6 +94,7 @@ export default function AdPerformancePage() {
   // Sort & filter data
   const filteredData = data
     .filter(item => {
+      if (activeOnly && item.status !== 'ACTIVE') return false;
       if (!searchQuery) return true;
       return item.name?.toLowerCase().includes(searchQuery.toLowerCase());
     })
@@ -98,6 +103,11 @@ export default function AdPerformancePage() {
       if (typeof aVal === 'string') return sortDir === 'desc' ? bVal?.localeCompare(aVal) : aVal?.localeCompare(bVal);
       return sortDir === 'desc' ? (bVal || 0) - (aVal || 0) : (aVal || 0) - (bVal || 0);
     });
+
+  // KPI calculations from filtered data
+  const totalSpent = filteredData.reduce((s, d) => s + (d.amountSpent || 0), 0);
+  const totalResults = filteredData.reduce((s, d) => s + (d.results || 0), 0);
+  const avgCpr = totalResults > 0 ? totalSpent / totalResults : 0;
 
   // Pause/Enable action
   const handleAction = async (item, action) => {
@@ -240,7 +250,53 @@ export default function AdPerformancePage() {
             >{t.label}</button>
           ))}
         </div>
+
+        {/* Separator */}
+        <div className="w-px h-6 bg-border mx-1" />
+
+        {/* Active only toggle */}
+        <button
+          onClick={() => setActiveOnly(v => !v)}
+          className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-all ${
+            activeOnly
+              ? 'bg-success/10 text-success border-success/30'
+              : 'bg-surface text-muted-foreground border-border hover:text-foreground'
+          }`}
+        >
+          <Filter size={12} />
+          {activeOnly ? 'Active Only' : 'All Statuses'}
+        </button>
       </div>
+
+      {/* ─── KPI Cards ─── */}
+      {fetchEnabled && filteredData.length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+          <div className="bg-card rounded-xl border border-border shadow-card p-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Total Results</span>
+              <div className="p-1.5 rounded-lg bg-primary/10"><TrendingUp size={14} className="text-primary" /></div>
+            </div>
+            <p className="text-2xl font-bold text-foreground">{formatNum(totalResults)}</p>
+            <p className="text-[10px] text-muted-foreground mt-1">{filteredData.length} {activeTab === 'campaign' ? 'campaigns' : activeTab === 'adset' ? 'ad sets' : 'ads'}{activeOnly ? ' (active)' : ''}</p>
+          </div>
+          <div className="bg-card rounded-xl border border-border shadow-card p-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Avg CPR</span>
+              <div className="p-1.5 rounded-lg bg-warning/10"><DollarSign size={14} className="text-warning" /></div>
+            </div>
+            <p className="text-2xl font-bold text-foreground">{avgCpr > 0 ? formatMoney(avgCpr) : '—'}</p>
+            <p className="text-[10px] text-muted-foreground mt-1">Cost per result across all {activeOnly ? 'active ' : ''}{activeTab === 'campaign' ? 'campaigns' : activeTab === 'adset' ? 'ad sets' : 'ads'}</p>
+          </div>
+          <div className="bg-card rounded-xl border border-border shadow-card p-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Total Spent</span>
+              <div className="p-1.5 rounded-lg bg-destructive/10"><DollarSign size={14} className="text-destructive" /></div>
+            </div>
+            <p className="text-2xl font-bold text-foreground">{formatMoney(totalSpent)}</p>
+            <p className="text-[10px] text-muted-foreground mt-1">Total spend for selected period</p>
+          </div>
+        </div>
+      )}
 
       {/* ─── Content ─── */}
       {!fetchEnabled ? (
