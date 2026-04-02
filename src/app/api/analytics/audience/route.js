@@ -30,45 +30,39 @@ export async function GET(request) {
     const allCountry = {};
     const allDevice = {};
 
-    for (const account of accounts) {
-      // Age + Gender breakdown
-      try {
-        const ageGenderData = await fetchBreakdown(account.meta_account_id, account.access_token, dateFrom, dateTo, 'age,gender');
-        for (const row of ageGenderData) {
-          const ageKey = row.age || 'Unknown';
-          const genderKey = row.gender === 'male' ? 'Male' : row.gender === 'female' ? 'Female' : 'Unknown';
-          // Age breakdown
-          if (!allAgeGender[ageKey]) allAgeGender[ageKey] = { age: ageKey, spend: 0, clicks: 0, impressions: 0, conversions: 0 };
-          allAgeGender[ageKey].spend += parseFloat(row.spend || 0);
-          allAgeGender[ageKey].clicks += parseInt(row.clicks || 0);
-          allAgeGender[ageKey].impressions += parseInt(row.impressions || 0);
-        }
-      } catch (e) { console.warn('Age/gender breakdown failed:', e.message); }
+    // Fetch ALL breakdowns for ALL accounts in parallel (maximum speed)
+    const accountResults = await Promise.all(accounts.map(async (account) => {
+      const [ageGenderData, countryData, deviceData] = await Promise.all([
+        fetchBreakdown(account.meta_account_id, account.access_token, dateFrom, dateTo, 'age,gender').catch(() => []),
+        fetchBreakdown(account.meta_account_id, account.access_token, dateFrom, dateTo, 'country').catch(() => []),
+        fetchBreakdown(account.meta_account_id, account.access_token, dateFrom, dateTo, 'device_platform').catch(() => []),
+      ]);
+      return { ageGenderData, countryData, deviceData };
+    }));
 
-      // Country breakdown
-      try {
-        const countryData = await fetchBreakdown(account.meta_account_id, account.access_token, dateFrom, dateTo, 'country');
-        for (const row of countryData) {
-          const key = row.country || 'Unknown';
-          if (!allCountry[key]) allCountry[key] = { country: key, spend: 0, clicks: 0, impressions: 0, reach: 0 };
-          allCountry[key].spend += parseFloat(row.spend || 0);
-          allCountry[key].clicks += parseInt(row.clicks || 0);
-          allCountry[key].impressions += parseInt(row.impressions || 0);
-          allCountry[key].reach += parseInt(row.reach || 0);
-        }
-      } catch (e) { console.warn('Country breakdown failed:', e.message); }
-
-      // Device breakdown
-      try {
-        const deviceData = await fetchBreakdown(account.meta_account_id, account.access_token, dateFrom, dateTo, 'device_platform');
-        for (const row of deviceData) {
-          const key = row.device_platform || 'Unknown';
-          if (!allDevice[key]) allDevice[key] = { device: key, spend: 0, clicks: 0, impressions: 0 };
-          allDevice[key].spend += parseFloat(row.spend || 0);
-          allDevice[key].clicks += parseInt(row.clicks || 0);
-          allDevice[key].impressions += parseInt(row.impressions || 0);
-        }
-      } catch (e) { console.warn('Device breakdown failed:', e.message); }
+    for (const { ageGenderData, countryData, deviceData } of accountResults) {
+      for (const row of ageGenderData) {
+        const ageKey = row.age || 'Unknown';
+        if (!allAgeGender[ageKey]) allAgeGender[ageKey] = { age: ageKey, spend: 0, clicks: 0, impressions: 0 };
+        allAgeGender[ageKey].spend += parseFloat(row.spend || 0);
+        allAgeGender[ageKey].clicks += parseInt(row.clicks || 0);
+        allAgeGender[ageKey].impressions += parseInt(row.impressions || 0);
+      }
+      for (const row of countryData) {
+        const key = row.country || 'Unknown';
+        if (!allCountry[key]) allCountry[key] = { country: key, spend: 0, clicks: 0, impressions: 0, reach: 0 };
+        allCountry[key].spend += parseFloat(row.spend || 0);
+        allCountry[key].clicks += parseInt(row.clicks || 0);
+        allCountry[key].impressions += parseInt(row.impressions || 0);
+        allCountry[key].reach += parseInt(row.reach || 0);
+      }
+      for (const row of deviceData) {
+        const key = row.device_platform || 'Unknown';
+        if (!allDevice[key]) allDevice[key] = { device: key, spend: 0, clicks: 0, impressions: 0 };
+        allDevice[key].spend += parseFloat(row.spend || 0);
+        allDevice[key].clicks += parseInt(row.clicks || 0);
+        allDevice[key].impressions += parseInt(row.impressions || 0);
+      }
     }
 
     return NextResponse.json({
