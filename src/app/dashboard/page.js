@@ -117,6 +117,13 @@ export default function DashboardPage() {
   useEffect(() => {
     setLoading(true);
     Promise.all([fetchOverview(), fetchCampaigns()]).finally(() => setLoading(false));
+
+    // Auto-refresh from DB every 60 seconds (free, no Meta API calls)
+    const interval = setInterval(() => {
+      fetchOverview();
+      fetchCampaigns();
+    }, 60_000);
+    return () => clearInterval(interval);
   }, [fetchOverview, fetchCampaigns]);
 
   useEffect(() => { setPage(1); }, [debouncedSearch, perfFilter, selectedAccountId]);

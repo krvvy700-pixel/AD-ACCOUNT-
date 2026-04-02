@@ -13,6 +13,8 @@ export default function SettingsPage() {
   const [connectStatus, setConnectStatus] = useState(null);
   const [syncDays, setSyncDays] = useState(30);
   const [syncMsg, setSyncMsg] = useState('');
+  const [autoSyncMin, setAutoSyncMin] = useState(0);
+  const [autoSyncMsg, setAutoSyncMsg] = useState('');
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -26,6 +28,8 @@ export default function SettingsPage() {
     }
     const saved = localStorage.getItem('syncDays');
     if (saved) setSyncDays(parseInt(saved));
+    const savedAuto = localStorage.getItem('autoSyncMinutes');
+    if (savedAuto) setAutoSyncMin(parseInt(savedAuto));
   }, [refetchAccounts]);
 
   const handleConnect = () => { window.location.href = '/api/meta/connect'; };
@@ -122,6 +126,34 @@ export default function SettingsPage() {
           <div className="flex items-center gap-3">
             <button onClick={saveSyncDays} className="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity">Save</button>
             {syncMsg && <span className="text-xs text-success">{syncMsg}</span>}
+          </div>
+        </div>
+      </div>
+
+      {/* Auto-Sync Interval */}
+      <div className="mb-8">
+        <h2 className="text-base font-semibold text-foreground mb-4 flex items-center gap-2">
+          <Database size={16} /> Auto-Sync Interval
+        </h2>
+        <div className="bg-card rounded-xl border border-border shadow-card p-5">
+          <p className="text-sm text-muted-foreground mb-1">Automatically fetch fresh data from Meta API while the dashboard is open.</p>
+          <p className="text-xs text-muted-foreground mb-3">⚠️ Shorter intervals use more API quota. With 2 accounts, 5 min is recommended.</p>
+          <div className="flex items-center gap-2 mb-3">
+            {[{ label: 'Off', val: 0 }, { label: '2 min', val: 2 }, { label: '5 min', val: 5 }, { label: '10 min', val: 10 }, { label: '15 min', val: 15 }].map(o => (
+              <button key={o.val} onClick={() => setAutoSyncMin(o.val)}
+                className={`px-4 py-2 text-sm font-medium rounded-lg border transition-all ${autoSyncMin === o.val ? 'bg-primary text-primary-foreground border-primary' : 'border-border text-muted-foreground hover:text-foreground hover:border-foreground/20'}`}
+              >{o.label}</button>
+            ))}
+          </div>
+          <div className="flex items-center gap-3">
+            <button onClick={() => {
+              localStorage.setItem('autoSyncMinutes', String(autoSyncMin));
+              // Trigger storage event for AppShell to pick up
+              window.dispatchEvent(new StorageEvent('storage', { key: 'autoSyncMinutes', newValue: String(autoSyncMin) }));
+              setAutoSyncMsg(autoSyncMin > 0 ? `✅ Auto-sync every ${autoSyncMin} min!` : '✅ Auto-sync disabled');
+              setTimeout(() => setAutoSyncMsg(''), 3000);
+            }} className="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity">Save</button>
+            {autoSyncMsg && <span className="text-xs text-success">{autoSyncMsg}</span>}
           </div>
         </div>
       </div>

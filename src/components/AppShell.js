@@ -1,10 +1,10 @@
 'use client';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useCurrency } from '@/context/CurrencyContext';
 import { useAccount } from '@/context/AccountContext';
-import { BarChart3, Zap, Settings, Bell, RefreshCw, X, Menu, ChevronDown, Check } from 'lucide-react';
+import { BarChart3, Zap, Settings, Bell, RefreshCw, X, Menu, ChevronDown, Check, Clock } from 'lucide-react';
 
 export default function AppShell({ title, children }) {
   const pathname = usePathname();
@@ -16,6 +16,10 @@ export default function AppShell({ title, children }) {
   const [syncing, setSyncing] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [acctDropdown, setAcctDropdown] = useState(false);
+  const [lastSyncTime, setLastSyncTime] = useState(null);
+  const [nextSyncIn, setNextSyncIn] = useState(null);
+  const autoSyncRef = useRef(null);
+  const countdownRef = useRef(null);
 
   const fetchNotifs = useCallback(async () => {
     try {
@@ -33,7 +37,7 @@ export default function AppShell({ title, children }) {
     return () => clearInterval(iv);
   }, [fetchNotifs]);
 
-  const handleSync = async () => {
+  const doSync = useCallback(async () => {
     if (syncing) return;
     setSyncing(true);
     try {
@@ -42,10 +46,54 @@ export default function AppShell({ title, children }) {
         method: 'POST',
         headers: { 'x-manual-trigger': 'true', 'x-sync-days': syncDays },
       });
+      setLastSyncTime(new Date());
     } catch {}
     setSyncing(false);
     fetchNotifs();
-  };
+  }, [syncing, fetchNotifs]);
+
+  const handleSync = () => doSync();
+
+  // Auto-sync timer
+  useEffect(() => {
+    const setupAutoSync = () => {
+      // Clear existing
+      if (autoSyncRef.current) clearInterval(autoSyncRef.current);
+      if (countdownRef.current) clearInterval(countdownRef.current);
+
+      const minutes = parseInt(localStorage.getItem('autoSyncMinutes') || '0');
+      if (!minutes || minutes <= 0) { setNextSyncIn(null); return; }
+
+      const ms = minutes * 60_000;
+      let remaining = ms;
+
+      // Countdown ticker
+      countdownRef.current = setInterval(() => {
+        remaining -= 1000;
+        if (remaining <= 0) remaining = ms;
+        setNextSyncIn(Math.ceil(remaining / 1000));
+      }, 1000);
+
+      // Actual sync
+      autoSyncRef.current = setInterval(() => {
+        remaining = ms;
+        doSync();
+      }, ms);
+
+      setNextSyncIn(Math.ceil(ms / 1000));
+    };
+
+    setupAutoSync();
+    // Listen for settings changes
+    const onStorage = (e) => { if (e.key === 'autoSyncMinutes') setupAutoSync(); };
+    window.addEventListener('storage', onStorage);
+
+    return () => {
+      if (autoSyncRef.current) clearInterval(autoSyncRef.current);
+      if (countdownRef.current) clearInterval(countdownRef.current);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, [doSync]);
 
   const markAllRead = async () => {
     await fetch('/api/notifications', {
@@ -161,9 +209,22 @@ export default function AppShell({ title, children }) {
               className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium border border-border rounded-md hover:bg-muted transition-colors duration-150 disabled:opacity-50"
             >
               <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} />
-              Sync Now
+              {syncing ? 'Syncing...' : 'Sync Now'}
             </button>
-
+            {(nextSyncIn || lastSyncTime) && (
+              <div className="flex flex-col items-end">
+                {nextSyncIn && (
+                  <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                    <Clock size={9} /> Next: {formatCountdown(nextSyncIn)}
+                  </span>
+                )}
+                {lastSyncTime && (
+                  <span className="text-[10px] text-muted-foreground">
+                    Last: {lastSyncTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                )}
+              </div>
+            )}
             <div className="flex items-center bg-muted rounded-md p-0.5">
               {['USD', 'INR'].map((c) => (
                 <button
@@ -236,4 +297,11 @@ function formatTimeAgo(dateStr) {
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return `${hrs}h ago`;
   return `${Math.floor(hrs / 24)}d ago`;
+}
+
+function formatCountdown(seconds) {
+  if (seconds <= 0) return '0s';
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
