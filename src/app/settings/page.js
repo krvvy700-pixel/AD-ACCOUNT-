@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback } from 'react';
 import AppShell from '@/components/AppShell';
 import { useCurrency } from '@/context/CurrencyContext';
 import { useAccount } from '@/context/AccountContext';
-import { Settings as SettingsIcon, Clock, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Clock, CheckCircle2, AlertCircle, Database } from 'lucide-react';
 
 export default function SettingsPage() {
   const { rate, setRate } = useCurrency();
@@ -11,6 +11,8 @@ export default function SettingsPage() {
   const [rateInput, setRateInput] = useState(String(rate));
   const [rateMsg, setRateMsg] = useState('');
   const [connectStatus, setConnectStatus] = useState(null);
+  const [syncDays, setSyncDays] = useState(30);
+  const [syncMsg, setSyncMsg] = useState('');
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -22,6 +24,8 @@ export default function SettingsPage() {
       setConnectStatus({ type: 'error', msg: `❌ Connection failed: ${params.get('error')}` });
       window.history.replaceState({}, '', '/settings');
     }
+    const saved = localStorage.getItem('syncDays');
+    if (saved) setSyncDays(parseInt(saved));
   }, [refetchAccounts]);
 
   const handleConnect = () => { window.location.href = '/api/meta/connect'; };
@@ -48,6 +52,12 @@ export default function SettingsPage() {
       setRateMsg('✅ Rate updated!');
     } catch { setRateMsg('❌ Failed'); }
     setTimeout(() => setRateMsg(''), 3000);
+  };
+
+  const saveSyncDays = () => {
+    localStorage.setItem('syncDays', String(syncDays));
+    setSyncMsg('✅ Saved! Next sync will fetch this range.');
+    setTimeout(() => setSyncMsg(''), 3000);
   };
 
   return (
@@ -95,11 +105,32 @@ export default function SettingsPage() {
         </div>
       </div>
 
+      {/* Sync Range */}
+      <div className="mb-8">
+        <h2 className="text-base font-semibold text-foreground mb-4 flex items-center gap-2">
+          <Database size={16} /> Sync Range
+        </h2>
+        <div className="bg-card rounded-xl border border-border shadow-card p-5">
+          <p className="text-sm text-muted-foreground mb-3">How far back should each sync fetch data? Longer = more data but slower.</p>
+          <div className="flex items-center gap-2 mb-3">
+            {[7, 14, 30, 60, 90].map(d => (
+              <button key={d} onClick={() => setSyncDays(d)}
+                className={`px-4 py-2 text-sm font-medium rounded-lg border transition-all ${syncDays === d ? 'bg-primary text-primary-foreground border-primary' : 'border-border text-muted-foreground hover:text-foreground hover:border-foreground/20'}`}
+              >{d} days</button>
+            ))}
+          </div>
+          <div className="flex items-center gap-3">
+            <button onClick={saveSyncDays} className="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity">Save</button>
+            {syncMsg && <span className="text-xs text-success">{syncMsg}</span>}
+          </div>
+        </div>
+      </div>
+
       {/* Currency */}
       <div className="mb-8">
         <h2 className="text-base font-semibold text-foreground mb-4">Currency Conversion Rate</h2>
         <div className="bg-card rounded-xl border border-border shadow-card p-5">
-          <p className="text-sm text-muted-foreground mb-3">Set the USD → INR conversion rate used throughout the dashboard.</p>
+          <p className="text-sm text-muted-foreground mb-3">Set the USD → INR conversion rate.</p>
           <div className="flex items-center gap-3">
             <span className="text-sm font-medium text-foreground">1 USD =</span>
             <input type="number" step="0.01" value={rateInput} onChange={e => setRateInput(e.target.value)}

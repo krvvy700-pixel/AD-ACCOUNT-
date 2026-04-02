@@ -9,6 +9,7 @@ export const maxDuration = 60;
 export async function POST(request) {
   const authHeader = request.headers.get('x-cron-secret');
   const manualTrigger = request.headers.get('x-manual-trigger');
+  const syncDays = parseInt(request.headers.get('x-sync-days') || '30') || 30;
 
   if (!manualTrigger && authHeader !== process.env.CRON_SECRET_KEY) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -28,7 +29,7 @@ export async function POST(request) {
     }
 
     // Sync all accounts in PARALLEL for speed
-    const results = await Promise.all(accounts.map(account => syncAccount(supabase, account)));
+    const results = await Promise.all(accounts.map(account => syncAccount(supabase, account, syncDays)));
 
     return NextResponse.json({ results });
   } catch (err) {
@@ -37,7 +38,7 @@ export async function POST(request) {
   }
 }
 
-async function syncAccount(supabase, account) {
+async function syncAccount(supabase, account, syncDays = 30) {
   const syncStart = Date.now();
 
   const { data: syncRecord } = await supabase
@@ -51,7 +52,7 @@ async function syncAccount(supabase, account) {
 
     // 1. Fetch campaigns + insights in PARALLEL (biggest speedup)
     const dateTo = format(new Date(), 'yyyy-MM-dd');
-    const dateFrom = format(subDays(new Date(), 30), 'yyyy-MM-dd');
+    const dateFrom = format(subDays(new Date(), syncDays), 'yyyy-MM-dd');
 
     const [campaigns, insights] = await Promise.all([
       fetchCampaigns(account.meta_account_id, account.access_token),

@@ -37,7 +37,11 @@ export default function AppShell({ title, children }) {
     if (syncing) return;
     setSyncing(true);
     try {
-      await fetch('/api/sync', { method: 'POST', headers: { 'x-manual-trigger': 'true' } });
+      const syncDays = localStorage.getItem('syncDays') || '30';
+      await fetch('/api/sync', {
+        method: 'POST',
+        headers: { 'x-manual-trigger': 'true', 'x-sync-days': syncDays },
+      });
     } catch {}
     setSyncing(false);
     fetchNotifs();

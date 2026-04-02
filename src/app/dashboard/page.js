@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import AppShell from '@/components/AppShell';
 import { useCurrency } from '@/context/CurrencyContext';
 import { useAccount } from '@/context/AccountContext';
@@ -36,12 +36,33 @@ export default function DashboardPage() {
   const [perfFilter, setPerfFilter] = useState('');
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
+  const [overviewLoading, setOverviewLoading] = useState(false);
+
+  // Client-side cache for instant switching
+  const cacheRef = useRef({});
+  const searchTimerRef = useRef(null);
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+
+  // Debounce search input
+  useEffect(() => {
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = setTimeout(() => setDebouncedSearch(searchQuery), 300);
+    return () => clearTimeout(searchTimerRef.current);
+  }, [searchQuery]);
 
   const dateFrom = format(dateRange.from, 'yyyy-MM-dd');
   const dateTo = format(dateRange.to, 'yyyy-MM-dd');
 
-  // Fetch overview data
+  // Fetch overview data with caching
   const fetchOverview = useCallback(async () => {
+    const cacheKey = `${dateFrom}_${dateTo}_${breakdown}_${selectedAccountId}`;
+    // Serve from cache instantly
+    if (cacheRef.current[cacheKey]) {
+      const cached = cacheRef.current[cacheKey];
+      setKpis(cached.kpis); setChart(cached.chart);
+      setTrends(cached.trends); setPerformance(cached.performance);
+    }
+    setOverviewLoading(true);
     try {
       const res = await fetch(
         `/api/analytics/overview?from=${dateFrom}&to=${dateTo}&breakdown=${breakdown}${accountQueryParam}`
@@ -52,8 +73,11 @@ export default function DashboardPage() {
       if (data.chart) setChart(data.chart);
       if (data.trends) setTrends(data.trends);
       if (data.performance) setPerformance(data.performance);
+      // Store in cache
+      cacheRef.current[cacheKey] = data;
     } catch {}
-  }, [dateFrom, dateTo, breakdown, accountQueryParam]);
+    setOverviewLoading(false);
+  }, [dateFrom, dateTo, breakdown, accountQueryParam, selectedAccountId]);
 
   // Fetch campaign table
   const fetchCampaigns = useCallback(async () => {
@@ -63,7 +87,7 @@ export default function DashboardPage() {
         sort: sortKey, order: sortDir,
         page: String(page), limit: '25',
       });
-      if (searchQuery) params.set('search', searchQuery);
+      if (debouncedSearch) params.set('search', debouncedSearch);
       if (perfFilter) params.set('performance', perfFilter);
       if (selectedAccountId !== 'all') params.set('account', selectedAccountId);
 
@@ -75,7 +99,7 @@ export default function DashboardPage() {
       if (data.summary) setSummary(data.summary);
       if (data.filterOptions) setFilterOptions(data.filterOptions);
     } catch {}
-  }, [dateFrom, dateTo, sortKey, sortDir, page, searchQuery, perfFilter, selectedAccountId]);
+  }, [dateFrom, dateTo, sortKey, sortDir, page, debouncedSearch, perfFilter, selectedAccountId]);
 
   useEffect(() => {
     setLoading(true);
@@ -83,7 +107,7 @@ export default function DashboardPage() {
   }, [fetchOverview, fetchCampaigns]);
 
   // Reset page on filter change
-  useEffect(() => { setPage(1); }, [searchQuery, perfFilter, selectedAccountId]);
+  useEffect(() => { setPage(1); }, [debouncedSearch, perfFilter, selectedAccountId]);
 
   const handleSort = (key) => {
     if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -106,6 +130,7 @@ export default function DashboardPage() {
 
   const presets = [
     { label: 'Today', get: () => ({ from: new Date(), to: new Date() }) },
+    { label: 'Yesterday', get: () => ({ from: addDays(new Date(), -1), to: addDays(new Date(), -1) }) },
     { label: '7D', get: () => ({ from: addDays(new Date(), -7), to: new Date() }) },
     { label: '14D', get: () => ({ from: addDays(new Date(), -14), to: new Date() }) },
     { label: '30D', get: () => ({ from: addDays(new Date(), -30), to: new Date() }) },
