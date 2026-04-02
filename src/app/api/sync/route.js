@@ -5,6 +5,8 @@ import { subDays, format } from 'date-fns';
 
 // POST /api/sync — Triggers a full data sync for all active accounts
 // Protected by CRON_SECRET_KEY header
+export const maxDuration = 60; // Allow up to 60s on Vercel (requires Pro for >10s)
+
 export async function POST(request) {
   // Verify secret key
   const authHeader = request.headers.get('x-cron-secret');
@@ -99,9 +101,9 @@ export async function POST(request) {
           }
         }
 
-        // 3. Sync metrics (last 7 days)
+        // 3. Sync metrics (last 30 days)
         const dateTo = format(new Date(), 'yyyy-MM-dd');
-        const dateFrom = format(subDays(new Date(), 7), 'yyyy-MM-dd');
+        const dateFrom = format(subDays(new Date(), 30), 'yyyy-MM-dd');
 
         try {
           const insights = await fetchInsights(account.meta_account_id, account.access_token, dateFrom, dateTo, 'campaign');

@@ -159,37 +159,46 @@ export async function fetchAds(adSetId, accessToken) {
 
 /**
  * Fetch insights (metrics) for an ad account over a date range
+ * Handles pagination and multiple conversion action types
  */
 export async function fetchInsights(accountId, accessToken, dateFrom, dateTo, level = 'campaign') {
   const fields = [
     'campaign_id', 'campaign_name',
     'adset_id', 'adset_name',
     'ad_id', 'ad_name',
-    'impressions', 'inline_link_clicks', 'spend',
+    'impressions', 'clicks', 'inline_link_clicks', 'spend',
     'actions', 'action_values',
-    'reach', 'frequency', 'video_avg_time_watched_actions',
+    'reach', 'frequency', 'cpc', 'cpm', 'ctr',
   ].join(',');
 
-  const params = new URLSearchParams({
-    fields,
-    level,
-    time_range: JSON.stringify({ since: dateFrom, until: dateTo }),
-    time_increment: 1, // daily breakdown
-    limit: '500',
-    access_token: accessToken,
-  });
+  const allData = [];
+  let url = `${META_GRAPH_URL}/act_${accountId}/insights?` +
+    `fields=${fields}` +
+    `&level=${level}` +
+    `&time_range=${encodeURIComponent(JSON.stringify({ since: dateFrom, until: dateTo }))}` +
+    `&time_increment=1` +
+    `&limit=500` +
+    `&access_token=${accessToken}`;
 
-  const res = await fetch(`${META_GRAPH_URL}/act_${accountId}/insights?${params}`);
-
-  if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.error?.message || 'Failed to fetch insights');
+  // Paginate through all results
+  while (url) {
+    const res = await fetch(url);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      console.error('Insights API error:', err);
+      throw new Error(err.error?.message || `Insights API failed: ${res.status}`);
+    }
+    const json = await res.json();
+    if (json.data) allData.push(...json.data);
+    url = json.paging?.next || null;
   }
 
-  const { data } = await res.json();
-  return data.map(row => {
-    const conversions = extractActionValue(row.actions, 'offsite_conversion');
-    const conversionValue = extractActionValue(row.action_values, 'offsite_conversion');
+  return allData.map(row => {
+    // Extract conversions from multiple possible action types
+    const conversions = extractConversions(row.actions);
+    const conversionValue = extractConversionValue(row.action_values);
+    // Use clicks, or fall back to inline_link_clicks
+    const clicks = parseInt(row.clicks || row.inline_link_clicks || '0');
 
     return {
       campaignId: row.campaign_id,
@@ -200,7 +209,7 @@ export async function fetchInsights(accountId, accessToken, dateFrom, dateTo, le
       adName: row.ad_name,
       date: row.date_start,
       impressions: parseInt(row.impressions || '0'),
-      clicks: parseInt(row.inline_link_clicks || '0'),
+      clicks,
       spend: parseFloat(row.spend || '0'),
       conversions,
       conversionValue,
@@ -254,13 +263,44 @@ export async function updateBudget(campaignId, newBudgetDollars, accessToken) {
 
 // --- Helpers ---
 
-function extractActionValue(actions, actionType) {
+// Conversion action types Meta uses
+const CONVERSION_TYPES = [
+  'offsite_conversion',
+  'offsite_conversion.fb_pixel_purchase',
+  'offsite_conversion.fb_pixel_lead',
+  'offsite_conversion.fb_pixel_complete_registration',
+  'offsite_conversion.fb_pixel_add_to_cart',
+  'offsite_conversion.fb_pixel_initiate_checkout',
+  'purchase', 'lead', 'complete_registration',
+  'add_to_cart', 'initiate_checkout',
+  'omni_purchase', 'omni_add_to_cart',
+  'onsite_conversion.messaging_conversation_started_7d',
+  'landing_page_view',
+  'link_click',
+];
+
+function extractConversions(actions) {
   if (!actions || !Array.isArray(actions)) return 0;
-  const match = actions.find(a =>
-    a.action_type === actionType ||
-    a.action_type?.includes(actionType)
-  );
-  return match ? parseFloat(match.value || '0') : 0;
+  let total = 0;
+  for (const a of actions) {
+    if (CONVERSION_TYPES.some(t => a.action_type === t || a.action_type?.includes(t))) {
+      total += parseFloat(a.value || '0');
+      break; // take the first matching conversion type only
+    }
+  }
+  return total;
+}
+
+function extractConversionValue(actionValues) {
+  if (!actionValues || !Array.isArray(actionValues)) return 0;
+  let total = 0;
+  for (const a of actionValues) {
+    if (CONVERSION_TYPES.some(t => a.action_type === t || a.action_type?.includes(t))) {
+      total += parseFloat(a.value || '0');
+      break;
+    }
+  }
+  return total;
 }
 
 function summarizeTargeting(targeting) {
