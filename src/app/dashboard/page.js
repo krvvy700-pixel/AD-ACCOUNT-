@@ -9,9 +9,10 @@ import {
 } from 'recharts';
 import {
   ArrowUpRight, ArrowDownRight, ChevronUp, ChevronDown, ChevronRight,
-  TrendingUp, TrendingDown, Minus, Search, Pause, Play, Eye, X, Loader2, Users
+  TrendingUp, TrendingDown, Minus, Search, Pause, Play, X, Loader2, Users, Zap
 } from 'lucide-react';
 import { format, addDays, isSameDay } from 'date-fns';
+import { useRouter } from 'next/navigation';
 
 const CHART_METRICS = [
   { key: 'spend', label: 'Spend', color: 'hsl(217 91% 53%)', prefix: '$' },
@@ -28,6 +29,7 @@ const PIE_COLORS = ['hsl(217 91% 53%)', 'hsl(160 84% 39%)', 'hsl(280 65% 60%)', 
 export default function DashboardPage() {
   const { formatMoney, currency } = useCurrency();
   const { selectedAccountId, accountQueryParam } = useAccount();
+  const router = useRouter();
   const [dateRange, setDateRange] = useState({ from: addDays(new Date(), -14), to: new Date() });
   const [breakdown, setBreakdown] = useState('day');
   const [chartMetric, setChartMetric] = useState('spend');
@@ -209,36 +211,49 @@ export default function DashboardPage() {
 
   return (
     <AppShell title="Performance Overview">
-      {/* Controls */}
-      <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
-        <div className="flex items-center gap-2">
+      {/* Controls — single unified row */}
+      <div className="flex flex-wrap items-center gap-2 mb-6">
+        {/* Date presets */}
+        <div className="flex items-center bg-muted rounded-lg p-0.5">
           {presets.map(p => {
             const r = p.get();
             const active = isSameDay(dateRange.from, r.from) && isSameDay(dateRange.to, r.to);
             return (
               <button key={p.label} onClick={() => setDateRange(p.get())}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${active ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:text-foreground'}`}
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${active ? 'bg-surface text-foreground shadow-card' : 'text-muted-foreground hover:text-foreground'}`}
               >{p.label}</button>
             );
           })}
+        </div>
+
+        {/* Custom date range */}
+        <div className="flex items-center gap-1.5">
           <input type="date" value={dateFrom} onChange={e => setDateRange(r => ({ ...r, from: new Date(e.target.value) }))}
             className="px-2 py-1.5 text-xs border border-border rounded-md bg-surface text-foreground" />
-          <span className="text-xs text-muted-foreground">to</span>
+          <span className="text-[10px] text-muted-foreground">to</span>
           <input type="date" value={dateTo} onChange={e => setDateRange(r => ({ ...r, to: new Date(e.target.value) }))}
             className="px-2 py-1.5 text-xs border border-border rounded-md bg-surface text-foreground" />
         </div>
-        <div className="flex items-center gap-2">
-          <button onClick={fetchAudience}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border transition-all ${showAudience ? 'bg-primary text-primary-foreground border-primary' : 'border-border text-muted-foreground hover:text-foreground'}`}
-          ><Users size={12} /> Audience</button>
-          <div className="flex items-center bg-muted rounded-md p-0.5">
-            {['day', 'week', 'month'].map(b => (
-              <button key={b} onClick={() => setBreakdown(b)}
-                className={`px-3 py-1 text-xs font-medium rounded capitalize transition-all ${breakdown === b ? 'bg-surface text-foreground shadow-card' : 'text-muted-foreground hover:text-foreground'}`}
-              >{b}</button>
-            ))}
-          </div>
+
+        {/* Separator */}
+        <div className="w-px h-6 bg-border mx-1" />
+
+        {/* Breakdown */}
+        <div className="flex items-center bg-muted rounded-lg p-0.5">
+          {['Day', 'Week', 'Month'].map(b => (
+            <button key={b} onClick={() => setBreakdown(b.toLowerCase())}
+              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${breakdown === b.toLowerCase() ? 'bg-surface text-foreground shadow-card' : 'text-muted-foreground hover:text-foreground'}`}
+            >{b}</button>
+          ))}
         </div>
+
+        {/* Separator */}
+        <div className="w-px h-6 bg-border mx-1" />
+
+        {/* Audience toggle */}
+        <button onClick={fetchAudience}
+          className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border transition-all ${showAudience ? 'bg-primary text-primary-foreground border-primary' : 'border-border text-muted-foreground hover:text-foreground'}`}
+        ><Users size={12} /> Audience</button>
       </div>
 
       {/* KPI Cards */}
@@ -518,6 +533,10 @@ export default function DashboardPage() {
                               {actionLoading[c.id] === 'enable' ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
                             </button>
                           )}
+                          <button onClick={() => router.push(`/automation?campaign=${c.id}&name=${encodeURIComponent(c.name)}`)}
+                            className="p-1.5 rounded-md bg-primary/10 text-primary hover:bg-primary/20 transition-colors" title="Add Rule">
+                            <Zap size={12} />
+                          </button>
                         </div>
                       </td>
                     </tr>

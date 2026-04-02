@@ -1,17 +1,20 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
+import { useSearchParams } from 'next/navigation';
 import AppShell from '@/components/AppShell';
 import { useCurrency } from '@/context/CurrencyContext';
 import { Zap, Plus, Play, Pause, Edit2, Trash2, Clock, Shield, RotateCcw, X } from 'lucide-react';
 
 export default function AutomationPage() {
   const { formatMoney } = useCurrency();
+  const searchParams = useSearchParams();
   const [rules, setRules] = useState([]);
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingRule, setEditingRule] = useState(null);
   const [automationEnabled, setAutomationEnabled] = useState(true);
+  const [prefilledCampaign, setPrefilledCampaign] = useState(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -29,6 +32,19 @@ export default function AutomationPage() {
   }, []);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  // Auto-open modal if campaign param is present (from dashboard "Add Rule" button)
+  useEffect(() => {
+    const campaignId = searchParams.get('campaign');
+    const campaignName = searchParams.get('name');
+    if (campaignId && campaignName) {
+      setPrefilledCampaign({ id: campaignId, name: campaignName });
+      setEditingRule(null);
+      setModalOpen(true);
+      // Clean URL without reloading
+      window.history.replaceState({}, '', '/automation');
+    }
+  }, [searchParams]);
 
   const toggleRule = async (rule) => {
     await fetch('/api/automation/rules', {
@@ -179,13 +195,14 @@ export default function AutomationPage() {
       )}
 
       {/* Modal */}
-      {modalOpen && <RuleModal rule={editingRule} onClose={() => { setModalOpen(false); setEditingRule(null); }} onSave={fetchData} formatMoney={formatMoney} />}
+      {modalOpen && <RuleModal rule={editingRule} prefilledCampaign={prefilledCampaign} onClose={() => { setModalOpen(false); setEditingRule(null); setPrefilledCampaign(null); }} onSave={fetchData} formatMoney={formatMoney} />}
     </AppShell>
   );
 }
 
-function RuleModal({ rule, onClose, onSave, formatMoney }) {
-  const [name, setName] = useState(rule?.name || '');
+function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
+  const defaultName = prefilledCampaign ? `Rule for ${prefilledCampaign.name}` : '';
+  const [name, setName] = useState(rule?.name || defaultName);
   const [scope, setScope] = useState(rule?.scope || 'campaign');
   const [actionType, setActionType] = useState(rule?.action_type || 'pause_campaign');
   const [conditions, setConditions] = useState(rule?.conditions || [{ metric: 'spend', operator: '>', value: '', period: 'today' }]);
