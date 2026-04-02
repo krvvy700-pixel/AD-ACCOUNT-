@@ -15,6 +15,7 @@ const PUBLIC_PATHS = [
 const CRON_PATHS = [
   '/api/sync',
   '/api/automation/evaluate',
+  '/api/automation/live-evaluate',
 ];
 
 // Paths that require admin or developer role (write operations)

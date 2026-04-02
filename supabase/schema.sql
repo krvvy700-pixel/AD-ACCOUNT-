@@ -223,3 +223,23 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 CREATE INDEX IF NOT EXISTS idx_users_active ON users(is_active, role);
+
+-- =============================================================
+-- LIVE AD MONITORING — Auto-pause/resume tracking
+-- =============================================================
+
+CREATE TABLE IF NOT EXISTS automation_paused_ads (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    ad_external_id    TEXT NOT NULL,
+    ad_name           TEXT,
+    rule_id           UUID REFERENCES automation_rules(id) ON DELETE CASCADE,
+    rule_name         TEXT,
+    reason            TEXT,                -- 'cpr_threshold' | 'kill_switch'
+    metric_snapshot   JSONB DEFAULT '{}',  -- CPR, spend, results at time of pause
+    paused_at         TIMESTAMPTZ DEFAULT now(),
+    resumed_at        TIMESTAMPTZ,
+    is_paused         BOOLEAN DEFAULT true
+);
+
+CREATE INDEX IF NOT EXISTS idx_auto_paused_active ON automation_paused_ads(ad_external_id, is_paused);
+CREATE INDEX IF NOT EXISTS idx_auto_paused_rule ON automation_paused_ads(rule_id, is_paused);
