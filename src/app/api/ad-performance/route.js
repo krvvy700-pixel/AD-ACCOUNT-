@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { getSupabaseServer } from '@/lib/supabase-server';
-import { fetchInsights, fetchAds, fetchAdSets } from '@/lib/meta-api';
+import { fetchInsights } from '@/lib/meta-api';
+
+const META_GRAPH_URL = 'https://graph.facebook.com/v22.0';
 
 // GET /api/ad-performance?level=campaign|adset|ad&from=&to=&account=
 export async function GET(request) {
@@ -17,7 +19,6 @@ export async function GET(request) {
   const supabase = getSupabaseServer();
 
   try {
-    // Get all active accounts (or filter by specific account)
     let accountQuery = supabase
       .from('meta_accounts')
       .select('id, meta_account_id, access_token, name, currency')
@@ -32,9 +33,9 @@ export async function GET(request) {
     if (level === 'campaign') {
       return await handleCampaigns(supabase, accounts, dateFrom, dateTo, accountId);
     } else if (level === 'adset') {
-      return await handleAdSets(supabase, accounts, dateFrom, dateTo);
+      return await handleAdSets(accounts, dateFrom, dateTo);
     } else if (level === 'ad') {
-      return await handleAds(supabase, accounts, dateFrom, dateTo);
+      return await handleAds(accounts, dateFrom, dateTo);
     }
 
     return NextResponse.json({ error: 'Invalid level' }, { status: 400 });
@@ -44,7 +45,7 @@ export async function GET(request) {
   }
 }
 
-// === CAMPAIGNS (from DB — fast & free) ===
+// === CAMPAIGNS (from DB — fast & free, 2 queries only) ===
 async function handleCampaigns(supabase, accounts, dateFrom, dateTo, accountId) {
   let campaignQuery = supabase
     .from('campaigns')
@@ -57,7 +58,6 @@ async function handleCampaigns(supabase, accounts, dateFrom, dateTo, accountId) 
 
   const campaignIds = campaigns.map(c => c.id);
 
-  // Get metrics from DB
   const { data: metrics } = await supabase
     .from('metrics')
     .select('campaign_id, spend, clicks, impressions, conversions, conversion_value')
@@ -66,7 +66,6 @@ async function handleCampaigns(supabase, accounts, dateFrom, dateTo, accountId) 
     .gte('date', dateFrom)
     .lte('date', dateTo);
 
-  // Aggregate
   const metricsMap = {};
   for (const m of (metrics || [])) {
     if (!metricsMap[m.campaign_id]) metricsMap[m.campaign_id] = { spend: 0, conversions: 0, impressions: 0, clicks: 0 };
@@ -96,28 +95,32 @@ async function handleCampaigns(supabase, accounts, dateFrom, dateTo, accountId) 
   return NextResponse.json({ data });
 }
 
-// === AD SETS (from Meta API — live, accurate) ===
-async function handleAdSets(supabase, accounts, dateFrom, dateTo) {
+// === AD SETS — 2 parallel API calls per account (insights + statuses) ===
+async function handleAdSets(accounts, dateFrom, dateTo) {
   const allData = [];
 
-  for (const account of accounts) {
+  // Process all accounts in parallel
+  await Promise.all(accounts.map(async (account) => {
     try {
-      // Fetch adset-level insights from Meta API
-      const insights = await fetchInsights(
-        account.meta_account_id, account.access_token,
-        dateFrom, dateTo, 'adset'
-      );
+      // Two calls in PARALLEL: insights + ad set statuses at account level
+      const [insights, adSetStatuses] = await Promise.all([
+        fetchInsights(account.meta_account_id, account.access_token, dateFrom, dateTo, 'adset'),
+        fetchAccountAdSets(account.meta_account_id, account.access_token),
+      ]);
+
+      // Build status lookup
+      const statusMap = {};
+      for (const as of adSetStatuses) {
+        statusMap[as.id] = as.status;
+      }
 
       // Aggregate insights by ad set
       const adSetMap = {};
       for (const row of insights) {
         if (!adSetMap[row.adSetId]) {
           adSetMap[row.adSetId] = {
-            id: row.adSetId,
-            externalId: row.adSetId,
-            name: row.adSetName,
-            entityType: 'adset',
-            thumbnailUrl: null,
+            id: row.adSetId, externalId: row.adSetId, name: row.adSetName,
+            entityType: 'adset', thumbnailUrl: null,
             spend: 0, conversions: 0, impressions: 0,
           };
         }
@@ -127,65 +130,49 @@ async function handleAdSets(supabase, accounts, dateFrom, dateTo) {
         a.impressions += row.impressions;
       }
 
-      // Get ad set statuses via separate call
-      let adSetStatuses = {};
-      try {
-        // Get campaigns first to fetch their ad sets
-        const { data: campaigns } = await supabase
-          .from('campaigns')
-          .select('external_id')
-          .eq('meta_account_id', account.id);
-
-        for (const camp of (campaigns || [])) {
-          try {
-            const adSets = await fetchAdSets(camp.external_id, account.access_token);
-            for (const as of adSets) {
-              adSetStatuses[as.externalId] = as.status;
-            }
-          } catch {}
-        }
-      } catch {}
-
       for (const as of Object.values(adSetMap)) {
-        as.status = adSetStatuses[as.externalId] || 'UNKNOWN';
+        as.status = statusMap[as.externalId] || 'UNKNOWN';
         as.results = as.conversions;
         as.cpr = as.conversions > 0 ? +(as.spend / as.conversions).toFixed(2) : 0;
         as.amountSpent = +as.spend.toFixed(2);
         as.cpm = as.impressions > 0 ? +((as.spend / as.impressions) * 1000).toFixed(2) : 0;
-        delete as.spend;
-        delete as.conversions;
-        delete as.impressions;
+        delete as.spend; delete as.conversions; delete as.impressions;
         allData.push(as);
       }
     } catch (err) {
       console.error(`Ad set fetch error for ${account.name}:`, err.message);
     }
-  }
+  }));
 
   allData.sort((a, b) => b.amountSpent - a.amountSpent);
   return NextResponse.json({ data: allData });
 }
 
-// === ADS (from Meta API — live, accurate, with thumbnails) ===
-async function handleAds(supabase, accounts, dateFrom, dateTo) {
+// === ADS — 2 parallel API calls per account (insights + ad details) ===
+async function handleAds(accounts, dateFrom, dateTo) {
   const allData = [];
 
-  for (const account of accounts) {
+  // Process all accounts in parallel
+  await Promise.all(accounts.map(async (account) => {
     try {
-      // Fetch ad-level insights from Meta API
-      const insights = await fetchInsights(
-        account.meta_account_id, account.access_token,
-        dateFrom, dateTo, 'ad'
-      );
+      // Two calls in PARALLEL: insights + ad details (status + thumbnail) at account level
+      const [insights, adDetailsList] = await Promise.all([
+        fetchInsights(account.meta_account_id, account.access_token, dateFrom, dateTo, 'ad'),
+        fetchAccountAds(account.meta_account_id, account.access_token),
+      ]);
+
+      // Build details lookup
+      const detailsMap = {};
+      for (const ad of adDetailsList) {
+        detailsMap[ad.id] = ad;
+      }
 
       // Aggregate insights by ad
       const adMap = {};
       for (const row of insights) {
         if (!adMap[row.adId]) {
           adMap[row.adId] = {
-            id: row.adId,
-            externalId: row.adId,
-            name: row.adName,
+            id: row.adId, externalId: row.adId, name: row.adName,
             entityType: 'ad',
             spend: 0, conversions: 0, impressions: 0,
           };
@@ -196,35 +183,8 @@ async function handleAds(supabase, accounts, dateFrom, dateTo) {
         a.impressions += row.impressions;
       }
 
-      // Get ad details (status + thumbnail) via separate call
-      let adDetails = {};
-      try {
-        const { data: campaigns } = await supabase
-          .from('campaigns')
-          .select('external_id')
-          .eq('meta_account_id', account.id);
-
-        for (const camp of (campaigns || [])) {
-          try {
-            const adSets = await fetchAdSets(camp.external_id, account.access_token);
-            for (const as of adSets) {
-              try {
-                const ads = await fetchAds(as.externalId, account.access_token);
-                for (const ad of ads) {
-                  adDetails[ad.externalId] = {
-                    status: ad.status,
-                    thumbnailUrl: ad.thumbnailUrl,
-                    creativeType: ad.creativeType,
-                  };
-                }
-              } catch {}
-            }
-          } catch {}
-        }
-      } catch {}
-
       for (const ad of Object.values(adMap)) {
-        const detail = adDetails[ad.externalId] || {};
+        const detail = detailsMap[ad.externalId] || {};
         ad.status = detail.status || 'UNKNOWN';
         ad.thumbnailUrl = detail.thumbnailUrl || null;
         ad.creativeType = detail.creativeType || null;
@@ -232,16 +192,50 @@ async function handleAds(supabase, accounts, dateFrom, dateTo) {
         ad.cpr = ad.conversions > 0 ? +(ad.spend / ad.conversions).toFixed(2) : 0;
         ad.amountSpent = +ad.spend.toFixed(2);
         ad.cpm = ad.impressions > 0 ? +((ad.spend / ad.impressions) * 1000).toFixed(2) : 0;
-        delete ad.spend;
-        delete ad.conversions;
-        delete ad.impressions;
+        delete ad.spend; delete ad.conversions; delete ad.impressions;
         allData.push(ad);
       }
     } catch (err) {
       console.error(`Ad fetch error for ${account.name}:`, err.message);
     }
-  }
+  }));
 
   allData.sort((a, b) => b.amountSpent - a.amountSpent);
   return NextResponse.json({ data: allData });
+}
+
+// ===================================================================
+// OPTIMIZED BULK FETCHERS — 1 API call per entity type per account
+// ===================================================================
+
+/**
+ * Fetch ALL ad sets for an account in ONE call (with status)
+ * Instead of: campaigns → adsets per campaign (N+1 calls)
+ */
+async function fetchAccountAdSets(accountId, accessToken) {
+  const res = await fetch(
+    `${META_GRAPH_URL}/act_${accountId}/adsets?fields=id,name,status&limit=500&access_token=${accessToken}`
+  );
+  if (!res.ok) return [];
+  const { data } = await res.json();
+  return (data || []).map(a => ({ id: a.id, name: a.name, status: a.status }));
+}
+
+/**
+ * Fetch ALL ads for an account in ONE call (with status + thumbnail)
+ * Instead of: campaigns → adsets → ads per adset (N×M calls)
+ */
+async function fetchAccountAds(accountId, accessToken) {
+  const res = await fetch(
+    `${META_GRAPH_URL}/act_${accountId}/ads?fields=id,name,status,creative{thumbnail_url,object_type}&limit=500&access_token=${accessToken}`
+  );
+  if (!res.ok) return [];
+  const { data } = await res.json();
+  return (data || []).map(ad => ({
+    id: ad.id,
+    name: ad.name,
+    status: ad.status,
+    thumbnailUrl: ad.creative?.thumbnail_url || null,
+    creativeType: ad.creative?.object_type || null,
+  }));
 }

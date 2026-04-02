@@ -197,7 +197,10 @@ CREATE TABLE IF NOT EXISTS sync_status (
     duration_ms         INT
 );
 
-ALTER PUBLICATION supabase_realtime ADD TABLE notifications;
+DO $$ BEGIN
+  ALTER PUBLICATION supabase_realtime ADD TABLE notifications;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- =============================================================
 -- ROLE-BASED ACCESS CONTROL
