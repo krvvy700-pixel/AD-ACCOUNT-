@@ -81,6 +81,10 @@ function AutomationContent() {
   const fmtAction = (type, params) => ({
     pause_campaign: '⏸ Pause Campaign',
     enable_campaign: '▶ Enable Campaign',
+    auto_pause_resume: '🔄 Auto Pause + Resume',
+    kill_switch: '💀 Kill (no resume)',
+    pause_ad: '⏸ Pause Ad',
+    enable_ad: '▶ Enable Ad',
     increase_budget: `📈 +${params?.percentage || 0}% Budget`,
     decrease_budget: `📉 -${params?.percentage || 0}% Budget`,
     set_budget: `💰 Set Budget ${formatMoney(params?.amount || 0)}`,
@@ -218,6 +222,8 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
   const [maxTriggers, setMaxTriggers] = useState(rule?.max_triggers_per_day || 2);
   const [dryRun, setDryRun] = useState(rule?.dry_run || false);
   const [budgetPct, setBudgetPct] = useState(rule?.action_params?.percentage || 20);
+
+  const isLiveScope = scope === 'ad' || scope === 'ad_set';
   const [budgetAmount, setBudgetAmount] = useState(rule?.action_params?.amount || '');
   const [saving, setSaving] = useState(false);
 
@@ -275,7 +281,7 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
               {conditions.map((c, i) => (
                 <div key={i} className="flex gap-2 mb-2 items-center">
                   <select value={c.metric} onChange={e => updateCond(i, 'metric', e.target.value)} className={`${inputCls} !w-auto`}>
-                    {['spend', 'conversions', 'roas', 'cpc', 'ctr', 'impressions', 'clicks'].map(m => <option key={m} value={m}>{m}</option>)}
+                    {['spend', 'cpr', 'conversions', 'roas', 'cpc', 'ctr', 'impressions', 'clicks'].map(m => <option key={m} value={m}>{m === 'cpr' ? 'CPR (cost/result)' : m}</option>)}
                   </select>
                   <select value={c.operator} onChange={e => updateCond(i, 'operator', e.target.value)} className={`${inputCls} !w-16`}>
                     {['>', '<', '>=', '<=', '=', '!='].map(o => <option key={o} value={o}>{o}</option>)}
@@ -297,9 +303,18 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
               <button onClick={() => setConditions([...conditions, { metric: 'spend', operator: '>', value: '', period: 'today' }])} className="text-xs text-primary hover:underline">+ Add Condition</button>
             </div>
 
+            {isLiveScope && (
+              <div className="rounded-lg px-4 py-3 bg-primary/5 border border-primary/20 text-xs text-foreground">
+                <p className="font-semibold text-primary mb-1">⚡ Live Monitor Rule</p>
+                <p className="text-muted-foreground">This rule will be evaluated every 60 seconds using live data from Meta API — even when the website is closed.</p>
+              </div>
+            )}
+
             <div>
               <label className="block text-xs font-medium text-muted-foreground uppercase mb-1.5">Action</label>
               <select value={actionType} onChange={e => setActionType(e.target.value)} className={inputCls}>
+                {isLiveScope && <option value="auto_pause_resume">🔄 Auto Pause + Resume (threshold)</option>}
+                {isLiveScope && <option value="kill_switch">💀 Kill Switch (no auto-resume)</option>}
                 <option value="pause_campaign">Pause campaign</option>
                 <option value="enable_campaign">Enable campaign</option>
                 <option value="increase_budget">Increase budget</option>
@@ -307,6 +322,12 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
                 <option value="set_budget">Set budget</option>
                 <option value="send_alert">Send alert only</option>
               </select>
+              {actionType === 'auto_pause_resume' && (
+                <p className="text-[10px] text-success mt-1">✅ Will auto-resume when condition is no longer met</p>
+              )}
+              {actionType === 'kill_switch' && (
+                <p className="text-[10px] text-destructive mt-1">⚠️ Permanently pauses — will NOT auto-resume</p>
+              )}
             </div>
 
             {['increase_budget', 'decrease_budget'].includes(actionType) && (
