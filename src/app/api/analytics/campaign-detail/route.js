@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSupabaseServer } from '@/lib/supabase-server';
-import { fetchAdSets, fetchInsights } from '@/lib/meta-api';
+import { fetchAdSets, fetchInsights, fetchPeriodReach } from '@/lib/meta-api';
 
 // GET /api/analytics/campaign-detail?id=UUID&from=&to=
 // Returns ad sets + per-ad-set metrics for drill-down
@@ -78,13 +78,14 @@ export async function GET(request) {
         impressions: m.impressions,
         conversions: m.conversions,
         reach: m.reach,
+        reachEstimated: true, // summed from daily insights — NOT deduplicated
         cpc: m.clicks > 0 ? m.spend / m.clicks : 0,
         ctr: m.impressions > 0 ? (m.clicks / m.impressions) * 100 : 0,
         roas: m.spend > 0 ? m.conversionValue / m.spend : 0,
       };
     }).sort((a, b) => b.spend - a.spend);
 
-    // Get campaign-level metrics from DB
+    // Get campaign-level metrics from DB (for spend, clicks, etc.)
     let campaignMetrics = { spend: 0, clicks: 0, impressions: 0, conversions: 0, conversionValue: 0, reach: 0 };
     if (dateFrom && dateTo) {
       const { data: metrics } = await supabase
@@ -101,7 +102,21 @@ export async function GET(request) {
         campaignMetrics.impressions += parseInt(r.impressions || 0);
         campaignMetrics.conversions += parseFloat(r.conversions || 0);
         campaignMetrics.conversionValue += parseFloat(r.conversion_value || 0);
+        // Don't sum daily reach — we'll get deduplicated reach below
         campaignMetrics.reach += parseInt(r.reach || 0);
+      }
+
+      // REACH FIX: Fetch deduplicated reach for this specific campaign from Meta API
+      try {
+        const campaignReachMap = await fetchPeriodReach(
+          account.meta_account_id, account.access_token, dateFrom, dateTo, 'campaign'
+        );
+        if (campaignReachMap[campaign.external_id] != null) {
+          campaignMetrics.reach = campaignReachMap[campaign.external_id];
+        }
+      } catch (reachErr) {
+        console.warn('[CampaignDetail] Deduplicated reach fetch failed, using summed daily:', reachErr.message);
+        // campaignMetrics.reach already has the summed daily fallback
       }
     }
 

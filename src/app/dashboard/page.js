@@ -470,7 +470,7 @@ export default function DashboardPage() {
                 <th className="w-8" />
                 {[
                   ['name', 'Name'], ['status', 'Status'], ['spend', 'Spend'],
-                  ['clicks', 'Clicks'], ['conversions', 'Conv.'], ['cpc', 'CPC'],
+                  ['reach', 'Reach'], ['clicks', 'Clicks'], ['conversions', 'Conv.'], ['cpc', 'CPC'],
                   ['ctr', 'CTR'], ['roas', 'ROAS'], ['performanceTier', 'Tier'],
                 ].map(([key, label]) => (
                   <th key={key} onClick={() => handleSort(key)}
@@ -483,7 +483,7 @@ export default function DashboardPage() {
             </thead>
             <tbody>
               {campaigns.length === 0 && !loading ? (
-                <tr><td colSpan={12} className="text-center py-12 text-sm text-muted-foreground">No campaigns found</td></tr>
+                <tr><td colSpan={13} className="text-center py-12 text-sm text-muted-foreground">No campaigns found</td></tr>
               ) : campaigns.map((c) => {
                 const pacing = getPacing(c);
                 const isExpanded = expandedCampaign === c.id;
@@ -503,6 +503,9 @@ export default function DashboardPage() {
                         </span>
                       </td>
                       <td className="px-4 py-3">{formatMoney(c.spend)}</td>
+                      <td className="px-4 py-3" title={c.reachEstimated ? 'Approximate (summed daily)' : 'Deduplicated reach'}>
+                        {c.reachEstimated ? '~' : ''}{formatNum(c.reach)}
+                      </td>
                       <td className="px-4 py-3">{formatNum(c.clicks)}</td>
                       <td className="px-4 py-3">{c.conversions}</td>
                       <td className="px-4 py-3">{formatMoney(c.cpc)}</td>
@@ -543,7 +546,7 @@ export default function DashboardPage() {
                     {/* Drill-down row */}
                     {isExpanded && (
                       <tr key={`${c.id}-drill`}>
-                        <td colSpan={12} className="bg-muted/10 px-8 py-4 border-b border-border">
+                        <td colSpan={13} className="bg-muted/10 px-8 py-4 border-b border-border">
                           {drillLoading ? (
                             <div className="flex items-center gap-2 py-4"><Loader2 size={16} className="animate-spin text-primary" /><span className="text-xs text-muted-foreground">Loading ad sets...</span></div>
                           ) : drillData?.adSets?.length > 0 ? (
@@ -552,7 +555,7 @@ export default function DashboardPage() {
                               <table className="w-full text-xs">
                                 <thead>
                                   <tr className="border-b border-border">
-                                    {['Name', 'Status', 'Spend', 'Clicks', 'Impressions', 'CPC', 'CTR', 'ROAS', 'Targeting'].map(h => (
+                                    {['Name', 'Status', 'Spend', 'Reach', 'Clicks', 'Impressions', 'CPC', 'CTR', 'ROAS', 'Targeting'].map(h => (
                                       <th key={h} className="text-left px-3 py-2 font-semibold text-muted-foreground uppercase">{h}</th>
                                     ))}
                                   </tr>
@@ -565,6 +568,7 @@ export default function DashboardPage() {
                                         <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${as.status === 'ACTIVE' ? 'bg-success/10 text-success' : 'bg-muted text-muted-foreground'}`}>{as.status}</span>
                                       </td>
                                       <td className="px-3 py-2">{formatMoney(as.spend)}</td>
+                                      <td className="px-3 py-2" title="Approximate (summed daily)">~{formatNum(as.reach)}</td>
                                       <td className="px-3 py-2">{formatNum(as.clicks)}</td>
                                       <td className="px-3 py-2">{formatNum(as.impressions)}</td>
                                       <td className="px-3 py-2">{formatMoney(as.cpc)}</td>

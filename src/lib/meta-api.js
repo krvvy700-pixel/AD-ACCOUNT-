@@ -222,6 +222,57 @@ export async function fetchInsights(accountId, accessToken, dateFrom, dateTo, le
 }
 
 /**
+ * Fetch DEDUPLICATED reach for a date range (no time_increment = full period).
+ * Unlike daily rows where reach per day can overlap, this returns the true
+ * unique people reached across the entire period — matching Meta Ads Manager.
+ *
+ * @param {string} accountId - Meta ad account ID (without act_ prefix)
+ * @param {string} accessToken
+ * @param {string} dateFrom - YYYY-MM-DD
+ * @param {string} dateTo - YYYY-MM-DD
+ * @param {string} [level='account'] - 'account' or 'campaign'
+ * @returns {Promise<number|Object>} If level='account', returns a single number.
+ *   If level='campaign', returns { [campaignId]: reach }
+ */
+export async function fetchPeriodReach(accountId, accessToken, dateFrom, dateTo, level = 'account') {
+  const fields = level === 'campaign'
+    ? 'campaign_id,reach'
+    : 'reach';
+
+  let url = `${META_GRAPH_URL}/act_${accountId}/insights?` +
+    `fields=${fields}` +
+    (level === 'campaign' ? '&level=campaign' : '') +
+    `&time_range=${encodeURIComponent(JSON.stringify({ since: dateFrom, until: dateTo }))}` +
+    `&limit=500` +
+    `&access_token=${accessToken}`;
+
+  const allData = [];
+  while (url) {
+    const res = await fetch(url);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      console.error('Period reach API error:', err);
+      // Return 0/empty on failure — don't break the whole dashboard
+      return level === 'campaign' ? {} : 0;
+    }
+    const json = await res.json();
+    if (json.data) allData.push(...json.data);
+    url = json.paging?.next || null;
+  }
+
+  if (level === 'campaign') {
+    const map = {};
+    for (const row of allData) {
+      map[row.campaign_id] = parseInt(row.reach || '0');
+    }
+    return map;
+  }
+
+  // Account level — single row
+  return allData.length > 0 ? parseInt(allData[0].reach || '0') : 0;
+}
+
+/**
  * Pause a Meta campaign
  */
 export async function pauseCampaign(campaignId, accessToken) {

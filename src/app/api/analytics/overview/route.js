@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSupabaseServer } from '@/lib/supabase-server';
+import { fetchPeriodReach } from '@/lib/meta-api';
 
 // GET /api/analytics/overview — Advanced KPI + Chart data
 // Optimized: 3 queries total instead of N+1
@@ -66,6 +67,50 @@ export async function GET(request) {
     // === All computation is in-memory (fast) ===
     const current = aggregateMetrics(currentMetrics || []);
     const previous = aggregateMetrics(previousMetrics);
+
+    // === REACH FIX: Fetch DEDUPLICATED reach from Meta API ===
+    // Reach counts unique people — summing daily reach inflates by 3-5x.
+    // We make a separate API call WITHOUT time_increment=1 to get the
+    // true period-level deduplicated reach (matches Meta Ads Manager).
+    let deduplicatedReach = { current: 0, previous: 0 };
+    try {
+      // Get unique account IDs from campaigns
+      const accountMetaIds = [...new Set((campaigns || []).map(c => c.meta_account_id))];
+
+      // Fetch account tokens
+      const { data: accounts } = await supabase
+        .from('meta_accounts')
+        .select('id, meta_account_id, access_token')
+        .in('id', accountMetaIds)
+        .eq('is_active', true);
+
+      if (accounts?.length) {
+        // Fetch deduplicated reach for all accounts in parallel
+        const reachResults = await Promise.all(accounts.map(async (acc) => {
+          const [currReach, prevReach] = await Promise.all([
+            fetchPeriodReach(acc.meta_account_id, acc.access_token, dateFrom, dateTo).catch(() => 0),
+            compFrom ? fetchPeriodReach(acc.meta_account_id, acc.access_token, compFrom, compTo).catch(() => 0) : 0,
+          ]);
+          return { current: currReach, previous: prevReach };
+        }));
+
+        // Sum across accounts (cross-account reach can legitimately be summed
+        // since different ad accounts target different audiences)
+        for (const r of reachResults) {
+          deduplicatedReach.current += r.current;
+          deduplicatedReach.previous += r.previous;
+        }
+      }
+    } catch (reachErr) {
+      console.warn('[Overview] Failed to fetch deduplicated reach, falling back to summed daily:', reachErr.message);
+      // Fallback to summed daily reach (inflated but better than 0)
+      deduplicatedReach.current = current.reach;
+      deduplicatedReach.previous = previous.reach;
+    }
+
+    // Override reach with deduplicated values
+    current.reach = deduplicatedReach.current;
+    previous.reach = deduplicatedReach.previous;
     const chartData = buildChartData(currentMetrics || [], breakdown);
 
     // Campaign performance — computed from already-fetched data (no extra queries!)

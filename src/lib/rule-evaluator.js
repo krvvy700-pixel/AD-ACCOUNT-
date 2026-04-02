@@ -188,6 +188,13 @@ async function checkCanTrigger(supabase, rule, entityId) {
 
 /**
  * Get aggregated metrics for an entity over the rule's condition periods
+ *
+ * ⚠️ REACH LIMITATION: The `reach` metric returned here is summed from daily
+ * rows, which INFLATES the actual reach because the same user reached on
+ * multiple days is counted multiple times. For short periods (today, yesterday,
+ * last_3_days) this is a reasonable approximation. For longer periods (14d, 30d),
+ * reach could be 2-5x inflated. Use `impressions` for rules if you need
+ * accuracy, or consider fetching live reach from Meta API for critical rules.
  */
 async function getEntityMetrics(supabase, rule, entity) {
   const periods = [...new Set(rule.conditions.map(c => c.period))];

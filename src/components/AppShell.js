@@ -4,10 +4,12 @@ import Link from 'next/link';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useCurrency } from '@/context/CurrencyContext';
 import { useAccount } from '@/context/AccountContext';
-import { BarChart3, Zap, Settings, Bell, RefreshCw, X, Menu, ChevronDown, Check, Clock } from 'lucide-react';
+import { BarChart3, Zap, Settings, Bell, RefreshCw, X, Menu, ChevronDown, Check, Clock, LogOut } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 
 export default function AppShell({ title, children }) {
   const pathname = usePathname();
+  const router = useRouter();
   const { currency, setCurrency } = useCurrency();
   const { accounts, selectedAccountId, setSelectedAccountId, selectedAccount } = useAccount();
   const [showNotifs, setShowNotifs] = useState(false);
@@ -111,6 +113,14 @@ export default function AppShell({ title, children }) {
     { href: '/settings', label: 'Settings', icon: Settings },
   ];
 
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/login', { method: 'DELETE' });
+    } catch {}
+    router.push('/login');
+    router.refresh();
+  };
+
   return (
     <div className="min-h-screen bg-background">
       {/* Mobile toggle */}
@@ -195,6 +205,17 @@ export default function AppShell({ title, children }) {
             );
           })}
         </nav>
+
+        {/* Logout */}
+        <div className="px-3 pb-4 border-t border-border pt-3">
+          <button
+            onClick={handleLogout}
+            className="flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors w-full"
+          >
+            <LogOut size={18} />
+            Sign Out
+          </button>
+        </div>
       </aside>
 
       {/* Main */}

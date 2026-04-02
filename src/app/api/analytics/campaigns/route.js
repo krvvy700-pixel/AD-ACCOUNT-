@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSupabaseServer } from '@/lib/supabase-server';
+import { fetchPeriodReach } from '@/lib/meta-api';
 
 // GET /api/analytics/campaigns — Optimized campaign table
 export async function GET(request) {
@@ -78,6 +79,9 @@ export async function GET(request) {
     }
 
     // Build enriched rows
+    // NOTE: Per-campaign reach from summed daily rows is an APPROXIMATION.
+    // True deduplicated reach requires per-campaign API calls which is too
+    // expensive for the table view. We mark it with reachEstimated flag.
     const enriched = campaigns.map(c => {
       const curr = currMap[c.id] || { spend: 0, impressions: 0, clicks: 0, conversions: 0, conversionValue: 0, reach: 0 };
       const prev = prevMap[c.id] || { spend: 0, impressions: 0, clicks: 0, conversions: 0, conversionValue: 0 };
@@ -87,7 +91,9 @@ export async function GET(request) {
         dailyBudget: c.daily_budget, lifetimeBudget: c.lifetime_budget,
         accountName: c.meta_accounts?.name || 'Unknown',
         spend: curr.spend, impressions: curr.impressions, clicks: curr.clicks,
-        conversions: curr.conversions, conversionValue: curr.conversionValue, reach: curr.reach,
+        conversions: curr.conversions, conversionValue: curr.conversionValue,
+        reach: curr.reach,
+        reachEstimated: true, // summed daily reach — NOT deduplicated
         cpc: curr.clicks > 0 ? +(curr.spend / curr.clicks).toFixed(4) : 0,
         ctr: curr.impressions > 0 ? +((curr.clicks / curr.impressions) * 100).toFixed(4) : 0,
         roas: curr.spend > 0 ? +(curr.conversionValue / curr.spend).toFixed(4) : 0,
@@ -101,6 +107,45 @@ export async function GET(request) {
         performanceTier: getPerformanceTier(curr),
       };
     });
+
+    // Try to fetch deduplicated per-campaign reach from Meta API
+    // Only if we have a reasonable number of campaigns (avoid rate limits)
+    try {
+      const accountMetaIds = [...new Set(campaigns.map(c => c.meta_account_id))];
+      const { data: accounts } = await supabase
+        .from('meta_accounts')
+        .select('id, meta_account_id, access_token')
+        .in('id', accountMetaIds)
+        .eq('is_active', true);
+
+      if (accounts?.length) {
+        // Build external_id -> enriched row lookup
+        const externalIdMap = {};
+        for (const c of campaigns) externalIdMap[c.external_id] = c.id;
+
+        const allCampaignReach = {};
+        await Promise.all(accounts.map(async (acc) => {
+          const reachMap = await fetchPeriodReach(
+            acc.meta_account_id, acc.access_token, dateFrom, dateTo, 'campaign'
+          ).catch(() => ({}));
+          // Map Meta campaign ID -> deduplicated reach
+          for (const [metaCampId, reach] of Object.entries(reachMap)) {
+            const dbId = externalIdMap[metaCampId];
+            if (dbId) allCampaignReach[dbId] = reach;
+          }
+        }));
+
+        // Apply deduplicated reach to enriched rows
+        for (const row of enriched) {
+          if (allCampaignReach[row.id] != null) {
+            row.reach = allCampaignReach[row.id];
+            row.reachEstimated = false;
+          }
+        }
+      }
+    } catch (reachErr) {
+      console.warn('[Campaigns] Failed to fetch deduplicated campaign reach:', reachErr.message);
+    }
 
     // Filter
     let filtered = enriched;
