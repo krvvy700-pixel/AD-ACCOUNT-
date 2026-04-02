@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useCurrency } from '@/context/CurrencyContext';
 import { useAccount } from '@/context/AccountContext';
-import { BarChart3, Target, Zap, Settings, Users, Bell, RefreshCw, X, Menu, ChevronDown, Check, Clock, LogOut, Shield } from 'lucide-react';
+import { BarChart3, Target, Zap, Settings, Users, Bell, RefreshCw, X, Menu, ChevronDown, Check, Clock, LogOut, Shield, MessageCircle } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 
@@ -113,6 +113,7 @@ export default function AppShell({ title, children }) {
     { href: '/dashboard', label: 'Analytics', icon: BarChart3 },
     { href: '/ad-performance', label: 'Ad Performance', icon: Target },
     { href: '/automation', label: 'Automation', icon: Zap },
+    { href: '/comments', label: 'Comments', icon: MessageCircle },
     ...(isAdmin ? [{ href: '/user-management', label: 'Users', icon: Users }] : []),
     { href: '/settings', label: 'Settings', icon: Settings },
   ];
