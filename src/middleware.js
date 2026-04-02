@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
+import { verifySignature } from '@/lib/auth';
 
 const AUTH_COOKIE = 'meta_ads_session';
+const SESSION_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 // Paths that don't require authentication
 const PUBLIC_PATHS = [
@@ -13,6 +15,19 @@ const PUBLIC_PATHS = [
 const CRON_PATHS = [
   '/api/sync',
   '/api/automation/evaluate',
+];
+
+// Paths that require admin or developer role (write operations)
+const WRITE_API_PATHS = [
+  '/api/campaigns/action',
+  '/api/ad-performance/action',
+  '/api/users',
+];
+
+// Paths that require admin role only
+const ADMIN_ONLY_PATHS = [
+  '/api/users',
+  '/user-management',
 ];
 
 export async function middleware(request) {
@@ -38,7 +53,6 @@ export async function middleware(request) {
   const sessionCookie = request.cookies.get(AUTH_COOKIE);
 
   if (!sessionCookie?.value) {
-    // No session — redirect to login (for pages) or return 401 (for API)
     if (pathname.startsWith('/api/')) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
@@ -51,22 +65,31 @@ export async function middleware(request) {
   try {
     const decoded = atob(sessionCookie.value);
     const parts = decoded.split(':');
-    if (parts.length !== 3) throw new Error('Invalid token format');
 
-    const [username, timestamp, signature] = parts;
-    const adminPassword = process.env.ADMIN_PASSWORD;
+    // Support both old format (username:timestamp:sig) and new (username:role:timestamp:sig)
+    let username, role, timestamp, signature;
+    if (parts.length === 4) {
+      [username, role, timestamp, signature] = parts;
+    } else if (parts.length === 3) {
+      // Legacy format — treat as admin (env-based login)
+      [username, timestamp, signature] = parts;
+      role = 'admin';
+    } else {
+      throw new Error('Invalid token format');
+    }
 
-    if (!adminPassword) {
-      // Can't validate without password — deny
+    const signingSecret = process.env.ADMIN_PASSWORD;
+    if (!signingSecret) {
       return NextResponse.json({ error: 'Auth not configured' }, { status: 500 });
     }
 
-    // Verify signature
-    const payload = `${username}:${timestamp}`;
-    const expectedSig = await sign(payload, adminPassword);
+    // Verify HMAC signature (constant-time comparison)
+    const payload = parts.length === 4
+      ? `${username}:${role}:${timestamp}`
+      : `${username}:${timestamp}`;
+    const isValid = await verifySignature(payload, signature, signingSecret);
 
-    if (signature !== expectedSig) {
-      // Invalid signature — clear cookie and redirect to login
+    if (!isValid) {
       const response = pathname.startsWith('/api/')
         ? NextResponse.json({ error: 'Invalid session' }, { status: 401 })
         : NextResponse.redirect(new URL('/login', request.url));
@@ -74,9 +97,9 @@ export async function middleware(request) {
       return response;
     }
 
-    // Check if token is expired (7 days)
+    // Check if token is expired
     const tokenAge = Date.now() - parseInt(timestamp);
-    if (tokenAge > 7 * 24 * 60 * 60 * 1000) {
+    if (tokenAge > SESSION_MAX_AGE) {
       const response = pathname.startsWith('/api/')
         ? NextResponse.json({ error: 'Session expired' }, { status: 401 })
         : NextResponse.redirect(new URL('/login', request.url));
@@ -84,10 +107,39 @@ export async function middleware(request) {
       return response;
     }
 
-    // Valid session — proceed
-    return NextResponse.next();
+    // === ROLE-BASED ACCESS CONTROL ===
+
+    // Admin-only paths
+    if (ADMIN_ONLY_PATHS.some(p => pathname === p || pathname.startsWith(p + '/'))) {
+      if (role !== 'admin') {
+        if (pathname.startsWith('/api/')) {
+          return NextResponse.json({ error: 'Admin access required' }, { status: 403 });
+        }
+        return NextResponse.redirect(new URL('/dashboard', request.url));
+      }
+    }
+
+    // Write API paths — viewer cannot access
+    if (WRITE_API_PATHS.some(p => pathname === p || pathname.startsWith(p + '/'))) {
+      if (role === 'viewer') {
+        return NextResponse.json({ error: 'View-only access — action not permitted' }, { status: 403 });
+      }
+    }
+
+    // Automation rule create/update/delete — viewer cannot access
+    if (pathname === '/api/automation' && request.method !== 'GET') {
+      if (role === 'viewer') {
+        return NextResponse.json({ error: 'View-only access — action not permitted' }, { status: 403 });
+      }
+    }
+
+    // Pass role info to downstream via headers (for API routes to use)
+    const response = NextResponse.next();
+    response.headers.set('x-user-role', role);
+    response.headers.set('x-user-name', username);
+    return response;
+
   } catch {
-    // Malformed token — redirect to login
     if (pathname.startsWith('/api/')) {
       return NextResponse.json({ error: 'Invalid session' }, { status: 401 });
     }
@@ -99,19 +151,6 @@ export async function middleware(request) {
 
 export const config = {
   matcher: [
-    // Match all routes except _next/static, _next/image, favicon
     '/((?!_next/static|_next/image).*)',
   ],
 };
-
-// HMAC signature for session validation
-async function sign(payload, secret) {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw', encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false, ['sign']
-  );
-  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(payload));
-  return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
-}

@@ -198,3 +198,25 @@ CREATE TABLE IF NOT EXISTS sync_status (
 );
 
 ALTER PUBLICATION supabase_realtime ADD TABLE notifications;
+
+-- =============================================================
+-- ROLE-BASED ACCESS CONTROL
+-- =============================================================
+
+CREATE TABLE IF NOT EXISTS users (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    username          TEXT NOT NULL UNIQUE,
+    display_name      TEXT,
+    password_hash     TEXT NOT NULL,  -- PBKDF2-SHA256 hash
+    password_salt     TEXT NOT NULL,  -- Random salt per user
+    role              TEXT NOT NULL DEFAULT 'viewer'
+                      CHECK (role IN ('admin', 'developer', 'viewer')),
+    is_active         BOOLEAN DEFAULT true,
+    last_login_at     TIMESTAMPTZ,
+    created_by        UUID REFERENCES users(id),
+    created_at        TIMESTAMPTZ DEFAULT now(),
+    updated_at        TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+CREATE INDEX IF NOT EXISTS idx_users_active ON users(is_active, role);

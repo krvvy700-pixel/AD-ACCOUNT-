@@ -1,6 +1,7 @@
 import './globals.css';
 import { CurrencyProvider } from '@/context/CurrencyContext';
 import { AccountProvider } from '@/context/AccountContext';
+import { AuthProvider } from '@/context/AuthContext';
 
 export const metadata = {
   title: 'Meta Ads Analytics — Dashboard',
@@ -13,7 +14,9 @@ export default function RootLayout({ children }) {
       <body>
         <CurrencyProvider>
           <AccountProvider>
-            {children}
+            <AuthProvider>
+              {children}
+            </AuthProvider>
           </AccountProvider>
         </CurrencyProvider>
       </body>

@@ -4,8 +4,9 @@ import Link from 'next/link';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useCurrency } from '@/context/CurrencyContext';
 import { useAccount } from '@/context/AccountContext';
-import { BarChart3, Zap, Settings, Bell, RefreshCw, X, Menu, ChevronDown, Check, Clock, LogOut } from 'lucide-react';
+import { BarChart3, Target, Zap, Settings, Users, Bell, RefreshCw, X, Menu, ChevronDown, Check, Clock, LogOut, Shield } from 'lucide-react';
 import { useRouter } from 'next/navigation';
+import { useAuth } from '@/context/AuthContext';
 
 export default function AppShell({ title, children }) {
   const pathname = usePathname();
@@ -13,6 +14,7 @@ export default function AppShell({ title, children }) {
   const { currency, setCurrency } = useCurrency();
   const { accounts, selectedAccountId, setSelectedAccountId, selectedAccount } = useAccount();
   const [showNotifs, setShowNotifs] = useState(false);
+  const { isAdmin, role } = useAuth();
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [syncing, setSyncing] = useState(false);
@@ -109,7 +111,9 @@ export default function AppShell({ title, children }) {
 
   const navItems = [
     { href: '/dashboard', label: 'Analytics', icon: BarChart3 },
+    { href: '/ad-performance', label: 'Ad Performance', icon: Target },
     { href: '/automation', label: 'Automation', icon: Zap },
+    ...(isAdmin ? [{ href: '/user-management', label: 'Users', icon: Users }] : []),
     { href: '/settings', label: 'Settings', icon: Settings },
   ];
 

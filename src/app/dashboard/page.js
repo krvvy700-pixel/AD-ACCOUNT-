@@ -3,13 +3,15 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import AppShell from '@/components/AppShell';
 import { useCurrency } from '@/context/CurrencyContext';
 import { useAccount } from '@/context/AccountContext';
+import { useAuth } from '@/context/AuthContext';
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
   PieChart, Pie, Cell
 } from 'recharts';
 import {
   ArrowUpRight, ArrowDownRight, ChevronUp, ChevronDown, ChevronRight,
-  TrendingUp, TrendingDown, Minus, Search, Pause, Play, X, Loader2, Users, Zap
+  TrendingUp, TrendingDown, Minus, Search, Pause, Play, X, Loader2, Users, Zap,
+  Power, PowerOff
 } from 'lucide-react';
 import { format, addDays, isSameDay } from 'date-fns';
 import { useRouter } from 'next/navigation';
@@ -29,6 +31,7 @@ const PIE_COLORS = ['hsl(217 91% 53%)', 'hsl(160 84% 39%)', 'hsl(280 65% 60%)', 
 export default function DashboardPage() {
   const { formatMoney, currency } = useCurrency();
   const { selectedAccountId, accountQueryParam } = useAccount();
+  const { canPauseEnable, canCreateRules } = useAuth();
   const router = useRouter();
   const [dateRange, setDateRange] = useState({ from: addDays(new Date(), -14), to: new Date() });
   const [breakdown, setBreakdown] = useState('day');
@@ -49,6 +52,9 @@ export default function DashboardPage() {
   const [perfFilter, setPerfFilter] = useState('');
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
+
+  // Fetch toggle — default OFF (no API calls until user enables)
+  const [fetchEnabled, setFetchEnabled] = useState(false);
 
   // Drill-down state
   const [expandedCampaign, setExpandedCampaign] = useState(null);
@@ -117,6 +123,10 @@ export default function DashboardPage() {
   }, [dateFrom, dateTo, sortKey, sortDir, page, debouncedSearch, perfFilter, selectedAccountId]);
 
   useEffect(() => {
+    if (!fetchEnabled) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     Promise.all([fetchOverview(), fetchCampaigns()]).finally(() => setLoading(false));
 
@@ -126,7 +136,7 @@ export default function DashboardPage() {
       fetchCampaigns();
     }, 60_000);
     return () => clearInterval(interval);
-  }, [fetchOverview, fetchCampaigns]);
+  }, [fetchOverview, fetchCampaigns, fetchEnabled]);
 
   useEffect(() => { setPage(1); }, [debouncedSearch, perfFilter, selectedAccountId]);
 
@@ -211,6 +221,52 @@ export default function DashboardPage() {
 
   return (
     <AppShell title="Performance Overview">
+      {/* ─── Fetch Toggle ─── */}
+      <div className={`flex items-center justify-between mb-6 px-5 py-4 rounded-xl border transition-all duration-300 ${
+        fetchEnabled
+          ? 'bg-success/5 border-success/30'
+          : 'bg-card border-border shadow-card'
+      }`}>
+        <div className="flex items-center gap-3">
+          {fetchEnabled
+            ? <Power size={20} className="text-success" />
+            : <PowerOff size={20} className="text-muted-foreground" />
+          }
+          <div>
+            <p className="text-sm font-semibold text-foreground">
+              {fetchEnabled ? 'Data Fetching Active' : 'Data Fetching Paused'}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {fetchEnabled
+                ? 'Live data is being loaded — auto-refreshes every 60s'
+                : 'Turn on to start loading analytics data — no API calls while off'
+              }
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={() => setFetchEnabled(v => !v)}
+          className={`relative w-14 h-7 rounded-full transition-colors duration-300 ${
+            fetchEnabled ? 'bg-success' : 'bg-muted'
+          }`}
+        >
+          <span className={`absolute top-0.5 left-0.5 w-6 h-6 bg-white rounded-full shadow-md transition-transform duration-300 ${
+            fetchEnabled ? 'translate-x-7' : 'translate-x-0'
+          }`} />
+        </button>
+      </div>
+
+      {/* Show paused state when fetch is disabled */}
+      {!fetchEnabled && (
+        <div className="bg-card rounded-xl border border-border shadow-card p-16 text-center mb-8">
+          <PowerOff size={40} className="mx-auto text-muted-foreground/40 mb-4" />
+          <h3 className="text-lg font-semibold text-foreground mb-2">Fetching is Off</h3>
+          <p className="text-sm text-muted-foreground max-w-md mx-auto">
+            Enable the toggle above to start loading analytics data. No API calls are made while this is off.
+          </p>
+        </div>
+      )}
+      {fetchEnabled && (<>
       {/* Controls — single unified row */}
       <div className="flex flex-wrap items-center gap-2 mb-6">
         {/* Date presets */}
@@ -524,6 +580,7 @@ export default function DashboardPage() {
                         ) : <span className="text-xs text-muted-foreground">—</span>}
                       </td>
                       <td className="px-4 py-3">
+                        {canPauseEnable && (
                         <div className="flex items-center gap-1">
                           {c.status === 'ACTIVE' ? (
                             <button onClick={() => handleAction(c.id, 'pause')} disabled={!!actionLoading[c.id]}
@@ -536,11 +593,14 @@ export default function DashboardPage() {
                               {actionLoading[c.id] === 'enable' ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
                             </button>
                           )}
+                          {canCreateRules && (
                           <button onClick={() => router.push(`/automation?campaign=${c.id}&name=${encodeURIComponent(c.name)}`)}
                             className="p-1.5 rounded-md bg-primary/10 text-primary hover:bg-primary/20 transition-colors" title="Add Rule">
                             <Zap size={12} />
                           </button>
+                          )}
                         </div>
+                        )}
                       </td>
                     </tr>
                     {/* Drill-down row */}
@@ -611,6 +671,7 @@ export default function DashboardPage() {
           </div>
         )}
       </div>
+      </>)}
     </AppShell>
   );
 }

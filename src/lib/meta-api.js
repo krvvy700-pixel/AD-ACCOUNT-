@@ -312,6 +312,97 @@ export async function updateBudget(campaignId, newBudgetDollars, accessToken) {
   return res.json();
 }
 
+/**
+ * Pause an ad set
+ */
+export async function pauseAdSet(adSetId, accessToken) {
+  const res = await fetch(`${META_GRAPH_URL}/${adSetId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'PAUSED', access_token: accessToken }),
+  });
+  if (!res.ok) throw new Error('Failed to pause ad set');
+  return res.json();
+}
+
+/**
+ * Enable an ad set
+ */
+export async function enableAdSet(adSetId, accessToken) {
+  const res = await fetch(`${META_GRAPH_URL}/${adSetId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'ACTIVE', access_token: accessToken }),
+  });
+  if (!res.ok) throw new Error('Failed to enable ad set');
+  return res.json();
+}
+
+/**
+ * Pause an ad
+ */
+export async function pauseAd(adId, accessToken) {
+  const res = await fetch(`${META_GRAPH_URL}/${adId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'PAUSED', access_token: accessToken }),
+  });
+  if (!res.ok) throw new Error('Failed to pause ad');
+  return res.json();
+}
+
+/**
+ * Enable an ad
+ */
+export async function enableAd(adId, accessToken) {
+  const res = await fetch(`${META_GRAPH_URL}/${adId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'ACTIVE', access_token: accessToken }),
+  });
+  if (!res.ok) throw new Error('Failed to enable ad');
+  return res.json();
+}
+
+/**
+ * Fetch ad creative media (video source URL, full image URL) for preview modal.
+ * Called on-demand when user clicks a thumbnail.
+ */
+export async function fetchAdCreativeMedia(adId, accessToken) {
+  // First get the creative ID from the ad
+  const adRes = await fetch(
+    `${META_GRAPH_URL}/${adId}?fields=creative{id,thumbnail_url,object_type,object_story_spec,asset_feed_spec,video_id,image_url,image_hash}&access_token=${accessToken}`
+  );
+  if (!adRes.ok) return { type: 'image', url: null };
+  const adData = await adRes.json();
+  const creative = adData.creative;
+  if (!creative) return { type: 'image', url: null };
+
+  // If there's a video_id, fetch the video source URL
+  const videoId = creative.video_id
+    || creative.object_story_spec?.video_data?.video_id
+    || null;
+  if (videoId) {
+    try {
+      const videoRes = await fetch(
+        `${META_GRAPH_URL}/${videoId}?fields=source,picture,thumbnails&access_token=${accessToken}`
+      );
+      if (videoRes.ok) {
+        const videoData = await videoRes.json();
+        return {
+          type: 'video',
+          url: videoData.source || null,
+          thumbnail: videoData.picture || creative.thumbnail_url || null,
+        };
+      }
+    } catch {}
+  }
+
+  // Fallback to image
+  const imageUrl = creative.image_url || creative.thumbnail_url || null;
+  return { type: 'image', url: imageUrl };
+}
+
 // --- Helpers ---
 
 // Conversion action types Meta uses

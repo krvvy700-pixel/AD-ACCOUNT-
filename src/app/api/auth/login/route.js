@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
+import { getSupabaseServer } from '@/lib/supabase-server';
+import { verifyPassword, signToken } from '@/lib/auth';
 
 const AUTH_COOKIE = 'meta_ads_session';
 
@@ -8,35 +10,90 @@ export async function POST(request) {
   try {
     const { username, password } = await request.json();
 
-    const validUser = process.env.ADMIN_USERNAME;
-    const validPass = process.env.ADMIN_PASSWORD;
+    if (!username || !password) {
+      return NextResponse.json({ error: 'Username and password required' }, { status: 400 });
+    }
 
-    if (!validUser || !validPass) {
-      console.error('[Auth] ADMIN_USERNAME or ADMIN_PASSWORD not set in environment');
+    const signingSecret = process.env.ADMIN_PASSWORD;
+    if (!signingSecret) {
       return NextResponse.json({ error: 'Auth not configured on server' }, { status: 500 });
     }
 
-    if (username !== validUser || password !== validPass) {
-      return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 });
+    let authenticatedRole = null;
+    let displayName = null;
+
+    // === STEP 1: Check users table in DB ===
+    try {
+      const supabase = getSupabaseServer();
+      const { data: user } = await supabase
+        .from('users')
+        .select('id, username, display_name, password_hash, password_salt, role, is_active')
+        .eq('username', username)
+        .single();
+
+      if (user) {
+        // User found in DB
+        if (!user.is_active) {
+          return NextResponse.json({ error: 'Account is deactivated' }, { status: 403 });
+        }
+
+        const passwordValid = await verifyPassword(password, user.password_hash, user.password_salt);
+        if (!passwordValid) {
+          return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 });
+        }
+
+        authenticatedRole = user.role;
+        displayName = user.display_name || user.username;
+
+        // Update last login
+        await supabase
+          .from('users')
+          .update({ last_login_at: new Date().toISOString() })
+          .eq('id', user.id);
+      }
+    } catch {
+      // Users table might not exist yet — fall through to env check
     }
 
-    // Create a session token: base64(username:timestamp:signature)
+    // === STEP 2: Fallback to env-based admin ===
+    if (!authenticatedRole) {
+      const validUser = process.env.ADMIN_USERNAME;
+      const validPass = process.env.ADMIN_PASSWORD;
+
+      if (!validUser || !validPass) {
+        return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 });
+      }
+
+      if (username !== validUser || password !== validPass) {
+        return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 });
+      }
+
+      authenticatedRole = 'admin'; // env login is always admin
+      displayName = 'Admin';
+    }
+
+    // === STEP 3: Create signed session token ===
+    // Format: base64(username:role:timestamp:hmac_signature)
     const timestamp = Date.now();
-    const payload = `${username}:${timestamp}`;
-    const signature = await sign(payload, validPass);
+    const payload = `${username}:${authenticatedRole}:${timestamp}`;
+    const signature = await signToken(payload, signingSecret);
     const token = btoa(`${payload}:${signature}`);
 
-    // Set HTTP-only cookie — expires in 7 days
+    // Set HTTP-only secure cookie — expires in 7 days
     const cookieStore = await cookies();
     cookieStore.set(AUTH_COOKIE, token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
+      sameSite: 'strict', // stricter than 'lax' for security
       path: '/',
-      maxAge: 7 * 24 * 60 * 60, // 7 days
+      maxAge: 7 * 24 * 60 * 60,
     });
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json({
+      success: true,
+      role: authenticatedRole,
+      displayName,
+    });
   } catch (err) {
     console.error('[Auth] Login error:', err);
     return NextResponse.json({ error: 'Login failed' }, { status: 500 });
@@ -49,21 +106,9 @@ export async function DELETE() {
   cookieStore.set(AUTH_COOKIE, '', {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
+    sameSite: 'strict',
     path: '/',
     maxAge: 0,
   });
   return NextResponse.json({ success: true });
-}
-
-// Simple HMAC-like signature using Web Crypto
-async function sign(payload, secret) {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw', encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false, ['sign']
-  );
-  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(payload));
-  return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
