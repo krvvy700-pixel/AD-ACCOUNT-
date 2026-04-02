@@ -1,24 +1,36 @@
 'use client';
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import AppShell from '@/components/AppShell';
 import { useCurrency } from '@/context/CurrencyContext';
 import { useAccount } from '@/context/AccountContext';
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
-  AreaChart, Area
+  AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
+  PieChart, Pie, Cell
 } from 'recharts';
 import {
-  ArrowUpRight, ArrowDownRight, ChevronUp, ChevronDown,
-  TrendingUp, TrendingDown, Minus, Search, Filter
+  ArrowUpRight, ArrowDownRight, ChevronUp, ChevronDown, ChevronRight,
+  TrendingUp, TrendingDown, Minus, Search, Pause, Play, Eye, X, Loader2, Users
 } from 'lucide-react';
-import { format, addDays, subMonths, startOfMonth, endOfMonth, subDays, isSameMonth, isSameDay, isToday } from 'date-fns';
+import { format, addDays, isSameDay } from 'date-fns';
+
+const CHART_METRICS = [
+  { key: 'spend', label: 'Spend', color: 'hsl(217 91% 53%)', prefix: '$' },
+  { key: 'clicks', label: 'Clicks', color: 'hsl(280 65% 60%)', prefix: '' },
+  { key: 'impressions', label: 'Impressions', color: 'hsl(45 93% 55%)', prefix: '' },
+  { key: 'conversions', label: 'Conversions', color: 'hsl(160 84% 39%)', prefix: '' },
+  { key: 'cpc', label: 'CPC', color: 'hsl(350 80% 55%)', prefix: '$' },
+  { key: 'ctr', label: 'CTR %', color: 'hsl(190 80% 45%)', prefix: '', suffix: '%' },
+  { key: 'roas', label: 'ROAS', color: 'hsl(130 60% 45%)', prefix: '', suffix: 'x' },
+];
+
+const PIE_COLORS = ['hsl(217 91% 53%)', 'hsl(160 84% 39%)', 'hsl(280 65% 60%)', 'hsl(45 93% 55%)', 'hsl(350 80% 55%)', 'hsl(190 80% 45%)'];
 
 export default function DashboardPage() {
   const { formatMoney, currency } = useCurrency();
   const { selectedAccountId, accountQueryParam } = useAccount();
   const [dateRange, setDateRange] = useState({ from: addDays(new Date(), -14), to: new Date() });
-  const [calendarOpen, setCalendarOpen] = useState(false);
   const [breakdown, setBreakdown] = useState('day');
+  const [chartMetric, setChartMetric] = useState('spend');
 
   const [kpis, setKpis] = useState(null);
   const [chart, setChart] = useState([]);
@@ -28,7 +40,6 @@ export default function DashboardPage() {
   const [campaigns, setCampaigns] = useState([]);
   const [pagination, setPagination] = useState(null);
   const [summary, setSummary] = useState(null);
-  const [filterOptions, setFilterOptions] = useState(null);
 
   const [sortKey, setSortKey] = useState('spend');
   const [sortDir, setSortDir] = useState('desc');
@@ -36,14 +47,25 @@ export default function DashboardPage() {
   const [perfFilter, setPerfFilter] = useState('');
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
-  const [overviewLoading, setOverviewLoading] = useState(false);
 
-  // Client-side cache for instant switching
+  // Drill-down state
+  const [expandedCampaign, setExpandedCampaign] = useState(null);
+  const [drillData, setDrillData] = useState(null);
+  const [drillLoading, setDrillLoading] = useState(false);
+
+  // Audience state
+  const [audience, setAudience] = useState(null);
+  const [audienceLoading, setAudienceLoading] = useState(false);
+  const [showAudience, setShowAudience] = useState(false);
+
+  // Action state
+  const [actionLoading, setActionLoading] = useState({});
+
+  // Cache & debounce
   const cacheRef = useRef({});
   const searchTimerRef = useRef(null);
   const [debouncedSearch, setDebouncedSearch] = useState('');
 
-  // Debounce search input
   useEffect(() => {
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
     searchTimerRef.current = setTimeout(() => setDebouncedSearch(searchQuery), 300);
@@ -55,28 +77,21 @@ export default function DashboardPage() {
 
   // Fetch overview data with caching
   const fetchOverview = useCallback(async () => {
-    const cacheKey = `${dateFrom}_${dateTo}_${breakdown}_${selectedAccountId}`;
-    // Serve from cache instantly
+    const cacheKey = `ov_${dateFrom}_${dateTo}_${breakdown}_${selectedAccountId}`;
     if (cacheRef.current[cacheKey]) {
-      const cached = cacheRef.current[cacheKey];
-      setKpis(cached.kpis); setChart(cached.chart);
-      setTrends(cached.trends); setPerformance(cached.performance);
+      const c = cacheRef.current[cacheKey];
+      setKpis(c.kpis); setChart(c.chart); setTrends(c.trends); setPerformance(c.performance);
     }
-    setOverviewLoading(true);
     try {
-      const res = await fetch(
-        `/api/analytics/overview?from=${dateFrom}&to=${dateTo}&breakdown=${breakdown}${accountQueryParam}`
-      );
+      const res = await fetch(`/api/analytics/overview?from=${dateFrom}&to=${dateTo}&breakdown=${breakdown}${accountQueryParam}`);
       if (!res.ok) return;
       const data = await res.json();
       if (data.kpis) setKpis(data.kpis);
       if (data.chart) setChart(data.chart);
       if (data.trends) setTrends(data.trends);
       if (data.performance) setPerformance(data.performance);
-      // Store in cache
       cacheRef.current[cacheKey] = data;
     } catch {}
-    setOverviewLoading(false);
   }, [dateFrom, dateTo, breakdown, accountQueryParam, selectedAccountId]);
 
   // Fetch campaign table
@@ -90,14 +105,12 @@ export default function DashboardPage() {
       if (debouncedSearch) params.set('search', debouncedSearch);
       if (perfFilter) params.set('performance', perfFilter);
       if (selectedAccountId !== 'all') params.set('account', selectedAccountId);
-
       const res = await fetch(`/api/analytics/campaigns?${params}`);
       if (!res.ok) return;
       const data = await res.json();
       if (data.campaigns) setCampaigns(data.campaigns);
       if (data.pagination) setPagination(data.pagination);
       if (data.summary) setSummary(data.summary);
-      if (data.filterOptions) setFilterOptions(data.filterOptions);
     } catch {}
   }, [dateFrom, dateTo, sortKey, sortDir, page, debouncedSearch, perfFilter, selectedAccountId]);
 
@@ -106,8 +119,46 @@ export default function DashboardPage() {
     Promise.all([fetchOverview(), fetchCampaigns()]).finally(() => setLoading(false));
   }, [fetchOverview, fetchCampaigns]);
 
-  // Reset page on filter change
   useEffect(() => { setPage(1); }, [debouncedSearch, perfFilter, selectedAccountId]);
+
+  // Drill-down
+  const toggleDrill = async (campaignId) => {
+    if (expandedCampaign === campaignId) { setExpandedCampaign(null); setDrillData(null); return; }
+    setExpandedCampaign(campaignId);
+    setDrillLoading(true);
+    try {
+      const res = await fetch(`/api/analytics/campaign-detail?id=${campaignId}&from=${dateFrom}&to=${dateTo}`);
+      if (res.ok) setDrillData(await res.json());
+    } catch {}
+    setDrillLoading(false);
+  };
+
+  // Audience
+  const fetchAudience = async () => {
+    if (audience) { setShowAudience(!showAudience); return; }
+    setShowAudience(true);
+    setAudienceLoading(true);
+    try {
+      const acctParam = selectedAccountId !== 'all' ? `&account=${selectedAccountId}` : '';
+      const res = await fetch(`/api/analytics/audience?from=${dateFrom}&to=${dateTo}${acctParam}`);
+      if (res.ok) setAudience(await res.json());
+    } catch {}
+    setAudienceLoading(false);
+  };
+
+  // Quick actions
+  const handleAction = async (campaignId, action) => {
+    setActionLoading(l => ({ ...l, [campaignId]: action }));
+    try {
+      const res = await fetch('/api/campaigns/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ campaignId, action }),
+      });
+      if (res.ok) await fetchCampaigns();
+    } catch {}
+    setActionLoading(l => ({ ...l, [campaignId]: null }));
+  };
 
   const handleSort = (key) => {
     if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -136,6 +187,19 @@ export default function DashboardPage() {
     { label: '30D', get: () => ({ from: addDays(new Date(), -30), to: new Date() }) },
   ];
 
+  const activeChartMetric = CHART_METRICS.find(m => m.key === chartMetric) || CHART_METRICS[0];
+
+  // Budget pacing helper
+  const getPacing = (c) => {
+    if (!c.dailyBudget || c.dailyBudget <= 0) return null;
+    const daysDiff = Math.max(1, Math.ceil((new Date(dateTo) - new Date(dateFrom)) / 86400000));
+    const expectedSpend = c.dailyBudget * daysDiff;
+    const pct = expectedSpend > 0 ? (c.spend / expectedSpend) * 100 : 0;
+    if (pct >= 90 && pct <= 110) return { label: 'On Pace', color: 'text-success bg-success/10' };
+    if (pct < 90) return { label: `${pct.toFixed(0)}% Under`, color: 'text-warning bg-warning/10' };
+    return { label: `${pct.toFixed(0)}% Over`, color: 'text-destructive bg-destructive/10' };
+  };
+
   return (
     <AppShell title="Performance Overview">
       {/* Controls */}
@@ -156,12 +220,17 @@ export default function DashboardPage() {
           <input type="date" value={dateTo} onChange={e => setDateRange(r => ({ ...r, to: new Date(e.target.value) }))}
             className="px-2 py-1.5 text-xs border border-border rounded-md bg-surface text-foreground" />
         </div>
-        <div className="flex items-center bg-muted rounded-md p-0.5">
-          {['day', 'week', 'month'].map(b => (
-            <button key={b} onClick={() => setBreakdown(b)}
-              className={`px-3 py-1 text-xs font-medium rounded capitalize transition-all ${breakdown === b ? 'bg-surface text-foreground shadow-card' : 'text-muted-foreground hover:text-foreground'}`}
-            >{b}</button>
-          ))}
+        <div className="flex items-center gap-2">
+          <button onClick={fetchAudience}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border transition-all ${showAudience ? 'bg-primary text-primary-foreground border-primary' : 'border-border text-muted-foreground hover:text-foreground'}`}
+          ><Users size={12} /> Audience</button>
+          <div className="flex items-center bg-muted rounded-md p-0.5">
+            {['day', 'week', 'month'].map(b => (
+              <button key={b} onClick={() => setBreakdown(b)}
+                className={`px-3 py-1 text-xs font-medium rounded capitalize transition-all ${breakdown === b ? 'bg-surface text-foreground shadow-card' : 'text-muted-foreground hover:text-foreground'}`}
+              >{b}</button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -174,7 +243,6 @@ export default function DashboardPage() {
               <div className="p-4 space-y-2">
                 <div className="h-3 w-12 bg-muted rounded animate-pulse" />
                 <div className="h-6 w-20 bg-muted rounded animate-pulse" />
-                <div className="h-4 w-14 bg-muted rounded animate-pulse" />
               </div>
             </div>
           ))
@@ -198,61 +266,115 @@ export default function DashboardPage() {
         })}
       </div>
 
-      {/* Trends */}
-      {trends && (
-        <div className="flex flex-wrap gap-4 mb-6">
-          {Object.entries(trends).map(([metric, dir]) => {
-            if (dir === 'insufficient_data') return null;
-            const isGood = (['conversions', 'roas'].includes(metric) && dir === 'increasing') ||
-                          (['cpc', 'spend'].includes(metric) && dir === 'decreasing');
-            return (
-              <div key={metric} className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ${isGood ? 'bg-success/10 text-success' : dir === 'stable' ? 'bg-muted text-muted-foreground' : 'bg-destructive/10 text-destructive'}`}>
-                {dir === 'increasing' ? <TrendingUp size={12} /> : dir === 'decreasing' ? <TrendingDown size={12} /> : <Minus size={12} />}
-                {metric.toUpperCase()}: {dir}
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Chart */}
+      {/* Chart with Metric Toggle */}
       <div className="bg-card rounded-xl border border-border shadow-card p-6 mb-8">
-        <h3 className="text-sm font-semibold text-foreground mb-4">Spend & Conversions</h3>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-semibold text-foreground">Performance Chart</h3>
+          <div className="flex items-center gap-1 bg-muted rounded-lg p-0.5">
+            {CHART_METRICS.map(m => (
+              <button key={m.key} onClick={() => setChartMetric(m.key)}
+                className={`px-2.5 py-1 text-[11px] font-medium rounded transition-all ${chartMetric === m.key ? 'bg-surface text-foreground shadow-card' : 'text-muted-foreground hover:text-foreground'}`}
+              >{m.label}</button>
+            ))}
+          </div>
+        </div>
         {chart.length > 0 ? (
           <ResponsiveContainer width="100%" height={300}>
             <AreaChart data={chart}>
               <defs>
-                <linearGradient id="spendG" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="hsl(217 91% 53%)" stopOpacity={0.2} />
-                  <stop offset="100%" stopColor="hsl(217 91% 53%)" stopOpacity={0} />
-                </linearGradient>
-                <linearGradient id="convG" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="hsl(160 84% 39%)" stopOpacity={0.2} />
-                  <stop offset="100%" stopColor="hsl(160 84% 39%)" stopOpacity={0} />
+                <linearGradient id="chartG" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={activeChartMetric.color} stopOpacity={0.2} />
+                  <stop offset="100%" stopColor={activeChartMetric.color} stopOpacity={0} />
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="hsl(210 40% 96%)" />
               <XAxis dataKey="date" tick={{ fontSize: 11 }} stroke="hsl(215 16% 62%)" tickFormatter={d => {
-                if (d.length === 7) return d; // month
+                if (d.length === 7) return d;
                 const dt = new Date(d);
                 return `${dt.getMonth()+1}/${dt.getDate()}`;
               }} />
-              <YAxis yAxisId="left" tick={{ fontSize: 11 }} stroke="hsl(215 16% 62%)" tickFormatter={v => currency === 'INR' ? `₹${v}` : `$${v}`} />
-              <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} stroke="hsl(215 16% 62%)" />
-              <Tooltip contentStyle={{ backgroundColor: 'white', border: '1px solid hsl(220 13% 91%)', borderRadius: 8, fontSize: 12, boxShadow: '0 4px 12px rgba(0,0,0,0.06)' }} />
-              <Legend wrapperStyle={{ fontSize: '12px' }} />
-              <Area yAxisId="left" type="monotone" dataKey="spend" stroke="hsl(217 91% 53%)" fill="url(#spendG)" strokeWidth={2} name="Spend ($)" />
-              <Area yAxisId="right" type="monotone" dataKey="conversions" stroke="hsl(160 84% 39%)" fill="url(#convG)" strokeWidth={2} name="Conversions" />
+              <YAxis tick={{ fontSize: 11 }} stroke="hsl(215 16% 62%)" tickFormatter={v =>
+                activeChartMetric.prefix === '$' ? `${currency === 'INR' ? '₹' : '$'}${v.toFixed?.(0) || v}` :
+                activeChartMetric.suffix ? `${v}${activeChartMetric.suffix}` : formatNum(v)
+              } />
+              <Tooltip contentStyle={{ backgroundColor: 'white', border: '1px solid hsl(220 13% 91%)', borderRadius: 8, fontSize: 12 }}
+                formatter={(v) => [`${activeChartMetric.prefix}${typeof v === 'number' ? v.toFixed(2) : v}${activeChartMetric.suffix || ''}`, activeChartMetric.label]} />
+              <Area type="monotone" dataKey={chartMetric} stroke={activeChartMetric.color} fill="url(#chartG)" strokeWidth={2} name={activeChartMetric.label} />
             </AreaChart>
           </ResponsiveContainer>
         ) : (
           <div className="text-center py-12 text-sm text-muted-foreground">
-            {loading ? 'Loading chart data...' : 'No data yet — connect your Meta account and sync'}
+            {loading ? 'Loading chart data...' : 'No data yet — connect and sync'}
           </div>
         )}
       </div>
 
-      {/* Top/Bottom Performers (side by side) */}
+      {/* Audience Breakdown */}
+      {showAudience && (
+        <div className="bg-card rounded-xl border border-border shadow-card p-6 mb-8">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-semibold text-foreground flex items-center gap-2"><Users size={14} /> Audience Breakdown</h3>
+            <button onClick={() => setShowAudience(false)} className="p-1 rounded hover:bg-muted"><X size={16} /></button>
+          </div>
+          {audienceLoading ? (
+            <div className="text-center py-8"><Loader2 size={20} className="animate-spin mx-auto text-primary" /><p className="text-xs text-muted-foreground mt-2">Loading from Meta API...</p></div>
+          ) : audience ? (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              {/* Age */}
+              <div>
+                <h4 className="text-xs font-semibold uppercase text-muted-foreground mb-3">By Age</h4>
+                {audience.ageGender?.length > 0 ? (
+                  <ResponsiveContainer width="100%" height={200}>
+                    <BarChart data={audience.ageGender.slice(0, 8)}>
+                      <XAxis dataKey="age" tick={{ fontSize: 10 }} />
+                      <YAxis tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} />
+                      <Tooltip contentStyle={{ fontSize: 11, borderRadius: 6 }} />
+                      <Bar dataKey="spend" fill="hsl(217 91% 53%)" radius={[4,4,0,0]} name="Spend" />
+                    </BarChart>
+                  </ResponsiveContainer>
+                ) : <p className="text-xs text-muted-foreground">No data</p>}
+              </div>
+              {/* Country */}
+              <div>
+                <h4 className="text-xs font-semibold uppercase text-muted-foreground mb-3">Top Countries</h4>
+                {audience.country?.length > 0 ? (
+                  <div className="space-y-2">
+                    {audience.country.slice(0, 6).map(c => {
+                      const maxSpend = audience.country[0]?.spend || 1;
+                      return (
+                        <div key={c.country} className="flex items-center gap-2">
+                          <span className="text-sm font-medium w-8">{c.country}</span>
+                          <div className="flex-1 bg-muted rounded-full h-2 overflow-hidden">
+                            <div className="h-full bg-primary rounded-full" style={{ width: `${(c.spend / maxSpend) * 100}%` }} />
+                          </div>
+                          <span className="text-xs text-muted-foreground w-16 text-right">{formatMoney(c.spend)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : <p className="text-xs text-muted-foreground">No data</p>}
+              </div>
+              {/* Device */}
+              <div>
+                <h4 className="text-xs font-semibold uppercase text-muted-foreground mb-3">By Device</h4>
+                {audience.device?.length > 0 ? (
+                  <ResponsiveContainer width="100%" height={200}>
+                    <PieChart>
+                      <Pie data={audience.device} dataKey="spend" nameKey="device" cx="50%" cy="50%" outerRadius={70} innerRadius={35}>
+                        {audience.device.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
+                      </Pie>
+                      <Tooltip contentStyle={{ fontSize: 11, borderRadius: 6 }} formatter={v => formatMoney(v)} />
+                      <Legend wrapperStyle={{ fontSize: 10 }} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                ) : <p className="text-xs text-muted-foreground">No data</p>}
+              </div>
+            </div>
+          ) : <p className="text-xs text-muted-foreground">Failed to load audience data</p>}
+        </div>
+      )}
+
+      {/* Top/Bottom Performers */}
       {(performance.topCampaigns.length > 0 || performance.bottomCampaigns.length > 0) && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
           <div className="bg-card rounded-xl border border-border shadow-card p-5">
@@ -301,16 +423,12 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Campaign Table */}
+      {/* Campaign Table with Quick Actions + Drill-Down */}
       <div className="bg-card rounded-xl border border-border shadow-card overflow-hidden">
-        {/* Table controls */}
         <div className="flex flex-wrap items-center gap-3 px-5 py-3 border-b border-border">
           <div className="relative flex-1 min-w-[200px]">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-            <input
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-              placeholder="Search campaigns..."
+            <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="Search campaigns..."
               className="w-full pl-9 pr-3 py-2 text-sm border border-border rounded-lg bg-surface text-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary"
             />
           </div>
@@ -327,53 +445,120 @@ export default function DashboardPage() {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border bg-elevated">
+                <th className="w-8" />
                 {[
-                  ['name', 'Name'], ['status', 'Status'], ['accountName', 'Account'],
-                  ['spend', 'Spend'], ['clicks', 'Clicks'], ['conversions', 'Conv.'],
-                  ['cpc', 'CPC'], ['ctr', 'CTR'], ['roas', 'ROAS'], ['performanceTier', 'Tier'],
+                  ['name', 'Name'], ['status', 'Status'], ['spend', 'Spend'],
+                  ['clicks', 'Clicks'], ['conversions', 'Conv.'], ['cpc', 'CPC'],
+                  ['ctr', 'CTR'], ['roas', 'ROAS'], ['performanceTier', 'Tier'],
                 ].map(([key, label]) => (
                   <th key={key} onClick={() => handleSort(key)}
                     className={`text-left px-4 py-3 text-xs font-semibold uppercase tracking-wider cursor-pointer hover:text-foreground transition-colors select-none ${sortKey === key ? 'text-primary' : 'text-muted-foreground'}`}
-                  >
-                    <span className="flex items-center gap-1">{label}<SortIcon col={key} /></span>
-                  </th>
+                  ><span className="flex items-center gap-1">{label}<SortIcon col={key} /></span></th>
                 ))}
+                <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Pacing</th>
+                <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Actions</th>
               </tr>
             </thead>
             <tbody>
               {campaigns.length === 0 && !loading ? (
-                <tr><td colSpan={10} className="text-center py-12 text-sm text-muted-foreground">No campaigns found</td></tr>
-              ) : campaigns.map((c) => (
-                <tr key={c.id} className="border-b border-border-soft hover:bg-muted/30 transition-colors">
-                  <td className="px-4 py-3 font-medium text-foreground max-w-[200px] truncate">{c.name}</td>
-                  <td className="px-4 py-3">
-                    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${c.status === 'ACTIVE' ? 'bg-success/10 text-success' : c.status === 'PAUSED' ? 'bg-warning/10 text-warning' : 'bg-muted text-muted-foreground'}`}>
-                      <span className={`w-1.5 h-1.5 rounded-full ${c.status === 'ACTIVE' ? 'bg-success' : c.status === 'PAUSED' ? 'bg-warning' : 'bg-muted-foreground'}`} />
-                      {c.status}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-muted-foreground text-xs">{c.accountName}</td>
-                  <td className="px-4 py-3">
-                    {formatMoney(c.spend)}
-                    {c.changes?.spend ? <ChangeInline value={c.changes.spend} /> : null}
-                  </td>
-                  <td className="px-4 py-3">{formatNum(c.clicks)}</td>
-                  <td className="px-4 py-3">{c.conversions}</td>
-                  <td className="px-4 py-3">{formatMoney(c.cpc)}</td>
-                  <td className="px-4 py-3">{(c.ctr || 0).toFixed(2)}%</td>
-                  <td className={`px-4 py-3 font-semibold ${c.roas >= 3 ? 'text-success' : c.roas >= 1 ? 'text-warning' : 'text-destructive'}`}>
-                    {(c.roas || 0).toFixed(2)}
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase ${
-                      c.performanceTier === 'top' ? 'bg-success/10 text-success' :
-                      c.performanceTier === 'average' ? 'bg-primary/10 text-primary' :
-                      c.performanceTier === 'losing' ? 'bg-destructive/10 text-destructive' :
-                      'bg-muted text-muted-foreground'
-                    }`}>{c.performanceTier || '—'}</span>
-                  </td>
-                </tr>
-              ))}
+                <tr><td colSpan={12} className="text-center py-12 text-sm text-muted-foreground">No campaigns found</td></tr>
+              ) : campaigns.map((c) => {
+                const pacing = getPacing(c);
+                const isExpanded = expandedCampaign === c.id;
+                return (
+                  <> 
+                    <tr key={c.id} className={`border-b border-border-soft hover:bg-muted/30 transition-colors ${isExpanded ? 'bg-muted/20' : ''}`}>
+                      <td className="px-2">
+                        <button onClick={() => toggleDrill(c.id)} className="p-1 rounded hover:bg-muted transition-transform">
+                          <ChevronRight size={14} className={`text-muted-foreground transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                        </button>
+                      </td>
+                      <td className="px-4 py-3 font-medium text-foreground max-w-[200px] truncate">{c.name}</td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${c.status === 'ACTIVE' ? 'bg-success/10 text-success' : c.status === 'PAUSED' ? 'bg-warning/10 text-warning' : 'bg-muted text-muted-foreground'}`}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${c.status === 'ACTIVE' ? 'bg-success' : c.status === 'PAUSED' ? 'bg-warning' : 'bg-muted-foreground'}`} />
+                          {c.status}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">{formatMoney(c.spend)}</td>
+                      <td className="px-4 py-3">{formatNum(c.clicks)}</td>
+                      <td className="px-4 py-3">{c.conversions}</td>
+                      <td className="px-4 py-3">{formatMoney(c.cpc)}</td>
+                      <td className="px-4 py-3">{(c.ctr || 0).toFixed(2)}%</td>
+                      <td className={`px-4 py-3 font-semibold ${c.roas >= 3 ? 'text-success' : c.roas >= 1 ? 'text-warning' : 'text-destructive'}`}>{(c.roas || 0).toFixed(2)}</td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase ${
+                          c.performanceTier === 'top' ? 'bg-success/10 text-success' :
+                          c.performanceTier === 'average' ? 'bg-primary/10 text-primary' :
+                          c.performanceTier === 'losing' ? 'bg-destructive/10 text-destructive' : 'bg-muted text-muted-foreground'
+                        }`}>{c.performanceTier || '—'}</span>
+                      </td>
+                      <td className="px-4 py-3">
+                        {pacing ? (
+                          <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-semibold ${pacing.color}`}>{pacing.label}</span>
+                        ) : <span className="text-xs text-muted-foreground">—</span>}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-1">
+                          {c.status === 'ACTIVE' ? (
+                            <button onClick={() => handleAction(c.id, 'pause')} disabled={!!actionLoading[c.id]}
+                              className="p-1.5 rounded-md bg-warning/10 text-warning hover:bg-warning/20 transition-colors disabled:opacity-50" title="Pause">
+                              {actionLoading[c.id] === 'pause' ? <Loader2 size={12} className="animate-spin" /> : <Pause size={12} />}
+                            </button>
+                          ) : (
+                            <button onClick={() => handleAction(c.id, 'enable')} disabled={!!actionLoading[c.id]}
+                              className="p-1.5 rounded-md bg-success/10 text-success hover:bg-success/20 transition-colors disabled:opacity-50" title="Enable">
+                              {actionLoading[c.id] === 'enable' ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                    {/* Drill-down row */}
+                    {isExpanded && (
+                      <tr key={`${c.id}-drill`}>
+                        <td colSpan={12} className="bg-muted/10 px-8 py-4 border-b border-border">
+                          {drillLoading ? (
+                            <div className="flex items-center gap-2 py-4"><Loader2 size={16} className="animate-spin text-primary" /><span className="text-xs text-muted-foreground">Loading ad sets...</span></div>
+                          ) : drillData?.adSets?.length > 0 ? (
+                            <div>
+                              <h4 className="text-xs font-semibold uppercase text-muted-foreground mb-3">Ad Sets ({drillData.adSets.length})</h4>
+                              <table className="w-full text-xs">
+                                <thead>
+                                  <tr className="border-b border-border">
+                                    {['Name', 'Status', 'Spend', 'Clicks', 'Impressions', 'CPC', 'CTR', 'ROAS', 'Targeting'].map(h => (
+                                      <th key={h} className="text-left px-3 py-2 font-semibold text-muted-foreground uppercase">{h}</th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {drillData.adSets.map(as => (
+                                    <tr key={as.externalId} className="border-b border-border-soft hover:bg-muted/20">
+                                      <td className="px-3 py-2 font-medium text-foreground max-w-[180px] truncate">{as.name}</td>
+                                      <td className="px-3 py-2">
+                                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${as.status === 'ACTIVE' ? 'bg-success/10 text-success' : 'bg-muted text-muted-foreground'}`}>{as.status}</span>
+                                      </td>
+                                      <td className="px-3 py-2">{formatMoney(as.spend)}</td>
+                                      <td className="px-3 py-2">{formatNum(as.clicks)}</td>
+                                      <td className="px-3 py-2">{formatNum(as.impressions)}</td>
+                                      <td className="px-3 py-2">{formatMoney(as.cpc)}</td>
+                                      <td className="px-3 py-2">{(as.ctr || 0).toFixed(2)}%</td>
+                                      <td className={`px-3 py-2 font-semibold ${as.roas >= 1 ? 'text-success' : 'text-destructive'}`}>{(as.roas || 0).toFixed(2)}</td>
+                                      <td className="px-3 py-2 text-muted-foreground max-w-[200px] truncate">{as.targetingSummary || '—'}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          ) : (
+                            <p className="text-xs text-muted-foreground py-2">No ad sets found for this campaign</p>
+                          )}
+                        </td>
+                      </tr>
+                    )}
+                  </>
+                );
+              })}
             </tbody>
           </table>
         </div>
