@@ -4,6 +4,27 @@ import { fetchInsights } from '@/lib/meta-api';
 
 const META_GRAPH_URL = 'https://graph.facebook.com/v22.0';
 
+// Conversion action types — STRICT priority order.
+// Meta Ads Manager shows "Results" as the FIRST matching type only.
+// Must match the priority list in meta-api.js
+const CONVERSION_PRIORITY = [
+  'purchase',
+  'omni_purchase',
+  'offsite_conversion.fb_pixel_purchase',
+  'lead',
+  'offsite_conversion.fb_pixel_lead',
+  'complete_registration',
+  'offsite_conversion.fb_pixel_complete_registration',
+  'add_to_cart',
+  'omni_add_to_cart',
+  'offsite_conversion.fb_pixel_add_to_cart',
+  'initiate_checkout',
+  'offsite_conversion.fb_pixel_initiate_checkout',
+  'onsite_conversion.messaging_conversation_started_7d',
+  'landing_page_view',
+  'link_click',
+];
+
 // GET /api/ad-performance?level=campaign|adset|ad&from=&to=&account=
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
@@ -114,30 +135,30 @@ async function handleAdSets(accounts, dateFrom, dateTo) {
         statusMap[as.id] = as.status;
       }
 
-      // Aggregate insights by ad set
-      const adSetMap = {};
+      // Group raw insight rows by ad set (keep raw actions for consistent conversion type)
+      const adSetRows = {};
       for (const row of insights) {
-        if (!adSetMap[row.adSetId]) {
-          adSetMap[row.adSetId] = {
-            id: row.adSetId, externalId: row.adSetId, name: row.adSetName,
-            entityType: 'adset', thumbnailUrl: null,
-            spend: 0, conversions: 0, impressions: 0,
-          };
+        if (!adSetRows[row.adSetId]) {
+          adSetRows[row.adSetId] = { name: row.adSetName, rows: [] };
         }
-        const a = adSetMap[row.adSetId];
-        a.spend += row.spend;
-        a.conversions += row.conversions;
-        a.impressions += row.impressions;
+        adSetRows[row.adSetId].rows.push(row);
       }
 
-      for (const as of Object.values(adSetMap)) {
-        as.status = statusMap[as.externalId] || 'UNKNOWN';
-        as.results = as.conversions;
-        as.cpr = as.conversions > 0 ? +(as.spend / as.conversions).toFixed(2) : 0;
-        as.amountSpent = +as.spend.toFixed(2);
-        as.cpm = as.impressions > 0 ? +((as.spend / as.impressions) * 1000).toFixed(2) : 0;
-        delete as.spend; delete as.conversions; delete as.impressions;
-        allData.push(as);
+      // Aggregate with CONSISTENT conversion type per ad set
+      for (const [adSetId, { name, rows }] of Object.entries(adSetRows)) {
+        const agg = aggregateWithConsistentConversions(rows);
+        allData.push({
+          id: adSetId,
+          externalId: adSetId,
+          name,
+          entityType: 'adset',
+          thumbnailUrl: null,
+          status: statusMap[adSetId] || 'UNKNOWN',
+          results: agg.conversions,
+          cpr: agg.conversions > 0 ? +(agg.spend / agg.conversions).toFixed(2) : 0,
+          amountSpent: +agg.spend.toFixed(2),
+          cpm: agg.impressions > 0 ? +((agg.spend / agg.impressions) * 1000).toFixed(2) : 0,
+        });
       }
     } catch (err) {
       console.error(`Ad set fetch error for ${account.name}:`, err.message);
@@ -167,33 +188,32 @@ async function handleAds(accounts, dateFrom, dateTo) {
         detailsMap[ad.id] = ad;
       }
 
-      // Aggregate insights by ad
-      const adMap = {};
+      // Group raw insight rows by ad (keep raw actions for consistent conversion type)
+      const adRows = {};
       for (const row of insights) {
-        if (!adMap[row.adId]) {
-          adMap[row.adId] = {
-            id: row.adId, externalId: row.adId, name: row.adName,
-            entityType: 'ad',
-            spend: 0, conversions: 0, impressions: 0,
-          };
+        if (!adRows[row.adId]) {
+          adRows[row.adId] = { name: row.adName, rows: [] };
         }
-        const a = adMap[row.adId];
-        a.spend += row.spend;
-        a.conversions += row.conversions;
-        a.impressions += row.impressions;
+        adRows[row.adId].rows.push(row);
       }
 
-      for (const ad of Object.values(adMap)) {
-        const detail = detailsMap[ad.externalId] || {};
-        ad.status = detail.status || 'UNKNOWN';
-        ad.thumbnailUrl = detail.thumbnailUrl || null;
-        ad.creativeType = detail.creativeType || null;
-        ad.results = ad.conversions;
-        ad.cpr = ad.conversions > 0 ? +(ad.spend / ad.conversions).toFixed(2) : 0;
-        ad.amountSpent = +ad.spend.toFixed(2);
-        ad.cpm = ad.impressions > 0 ? +((ad.spend / ad.impressions) * 1000).toFixed(2) : 0;
-        delete ad.spend; delete ad.conversions; delete ad.impressions;
-        allData.push(ad);
+      // Aggregate with CONSISTENT conversion type per ad
+      for (const [adId, { name, rows }] of Object.entries(adRows)) {
+        const detail = detailsMap[adId] || {};
+        const agg = aggregateWithConsistentConversions(rows);
+        allData.push({
+          id: adId,
+          externalId: adId,
+          name,
+          entityType: 'ad',
+          status: detail.status || 'UNKNOWN',
+          thumbnailUrl: detail.thumbnailUrl || null,
+          creativeType: detail.creativeType || null,
+          results: agg.conversions,
+          cpr: agg.conversions > 0 ? +(agg.spend / agg.conversions).toFixed(2) : 0,
+          amountSpent: +agg.spend.toFixed(2),
+          cpm: agg.impressions > 0 ? +((agg.spend / agg.impressions) * 1000).toFixed(2) : 0,
+        });
       }
     } catch (err) {
       console.error(`Ad fetch error for ${account.name}:`, err.message);
@@ -202,6 +222,64 @@ async function handleAds(accounts, dateFrom, dateTo) {
 
   allData.sort((a, b) => b.amountSpent - a.amountSpent);
   return NextResponse.json({ data: allData });
+}
+
+// ===================================================================
+// CONSISTENT CONVERSION AGGREGATION
+// Meta Ads Manager picks ONE conversion type per entity, not per day.
+// We determine the dominant type first, then sum only that type.
+// ===================================================================
+
+/**
+ * Aggregate insight rows with a SINGLE consistent conversion type.
+ * Prevents result inflation from mixing different action types across days.
+ */
+function aggregateWithConsistentConversions(rows) {
+  let spend = 0, impressions = 0;
+
+  // First pass: sum spend/impressions and collect all raw action arrays
+  const allActions = [];
+  for (const row of rows) {
+    spend += row.spend;
+    impressions += row.impressions;
+    if (row.rawData?.actions) {
+      allActions.push(row.rawData.actions);
+    }
+  }
+
+  // Determine the SINGLE best conversion type across all rows
+  const dominantType = findDominantConversionType(allActions);
+
+  // Second pass: sum conversions using ONLY the dominant type
+  let conversions = 0;
+  if (dominantType) {
+    for (const actions of allActions) {
+      const action = actions.find(a => a.action_type === dominantType);
+      if (action) conversions += parseFloat(action.value || '0');
+    }
+  }
+
+  return { spend, impressions, conversions };
+}
+
+/**
+ * Find the highest-priority conversion type that appears in ANY of the daily rows.
+ * This ensures we use ONE consistent type for the entire entity.
+ */
+function findDominantConversionType(allActionArrays) {
+  // Collect all action types that exist across any day
+  const typeSet = new Set();
+  for (const actions of allActionArrays) {
+    for (const a of actions) {
+      typeSet.add(a.action_type);
+    }
+  }
+
+  // Return the highest-priority type that exists
+  for (const type of CONVERSION_PRIORITY) {
+    if (typeSet.has(type)) return type;
+  }
+  return null;
 }
 
 // ===================================================================

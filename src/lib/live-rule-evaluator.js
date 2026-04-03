@@ -1,14 +1,23 @@
 // =============================================================
-// LIVE AD MONITOR — Fetches real-time data, evaluates rules, 
-// auto-pauses AND auto-resumes ads based on thresholds.
+// LIVE AD MONITOR v2 — BULLETPROOF RULES ENGINE
 //
-// This runs every 60s via cron. It does NOT read from DB metrics.
-// Instead, it fetches LIVE insights directly from Meta API for
-// only the ads that have active rules — minimal API calls.
+// Runs every 60s via cron. Fetches LIVE data from Meta API.
+// Evaluates rules. Pauses ads that breach thresholds.
+// Resumes ads THE VERY NEXT CHECK (60s) when metrics recover.
+//
+// GUARANTEES:
+//  ✓ Cooldown on PAUSE only (not resume) — configured per rule
+//  ✓ Resume checks every 60s — no waiting, instant recovery
+//  ✓ Min spend guard — won't fire on $0.10 spend with 0 clicks
+//  ✓ NaN/Infinity guards — CPC=0 when no clicks, not Infinity
+//  ✓ Retry with backoff — 3 attempts on Meta API failures
+//  ✓ Full pagination — handles >500 ads
+//  ✓ Kill switch never resumes — permanent pause
+//  ✓ Duplicate-safe — upserts for paused_ads tracking
+//  ✓ Ad-set + Ad level support
 // =============================================================
 
 import { getSupabaseServer } from '@/lib/supabase-server';
-import { pauseAdSet, enableAdSet, pauseAd, enableAd } from '@/lib/meta-api';
 
 const META_GRAPH_URL = 'https://graph.facebook.com/v22.0';
 
@@ -19,16 +28,21 @@ const CONVERSION_PRIORITY = [
   'complete_registration', 'offsite_conversion.fb_pixel_complete_registration',
   'add_to_cart', 'omni_add_to_cart', 'offsite_conversion.fb_pixel_add_to_cart',
   'initiate_checkout', 'offsite_conversion.fb_pixel_initiate_checkout',
+  'onsite_conversion.messaging_conversation_started_7d',
+  'landing_page_view', 'link_click',
 ];
 
+// Default minimum spend before rules can fire ($)
+const DEFAULT_MIN_SPEND = 1.00;
+
 /**
- * Main entry: fetch live data + evaluate all active ad-level rules
+ * Main entry: fetch live data + evaluate ALL active ad/ad-set level rules
  */
 export async function evaluateLiveRules() {
   const supabase = getSupabaseServer();
   const startTime = Date.now();
 
-  // Check global kill switch
+  // ── Check global kill switch ──────────────────────────────
   const { data: setting } = await supabase
     .from('system_settings')
     .select('value')
@@ -39,17 +53,17 @@ export async function evaluateLiveRules() {
     return { skipped: true, reason: 'automation_disabled' };
   }
 
-  // Load active rules that target ads
+  // ── Load active rules (ad + ad_set scope only) ────────────
   const { data: rules, error } = await supabase
     .from('automation_rules')
     .select('*')
     .eq('is_active', true)
-    .in('scope', ['ad', 'ad_set']); // Only ad-level and ad-set-level rules
+    .in('scope', ['ad', 'ad_set']);
 
   if (error) throw error;
-  if (!rules?.length) return { evaluated: 0, message: 'No active ad rules' };
+  if (!rules?.length) return { evaluated: 0, message: 'No active ad/ad-set rules' };
 
-  // Get all accounts with tokens
+  // ── Get all accounts with tokens ──────────────────────────
   const { data: accounts } = await supabase
     .from('meta_accounts')
     .select('id, meta_account_id, access_token, name')
@@ -57,62 +71,65 @@ export async function evaluateLiveRules() {
 
   if (!accounts?.length) return { evaluated: 0, message: 'No active accounts' };
 
-  // Get currently auto-paused ads (so we know what to check for resume)
-  const { data: pausedAds } = await supabase
+  // ── Load currently auto-paused entities ───────────────────
+  const { data: pausedEntities } = await supabase
     .from('automation_paused_ads')
     .select('*')
     .eq('is_paused', true);
 
   const pausedMap = {};
-  for (const p of (pausedAds || [])) {
+  for (const p of (pausedEntities || [])) {
     pausedMap[p.ad_external_id] = p;
   }
 
-  // Fetch LIVE insights for ALL ads across all accounts (1 call per account)
-  const liveData = {}; // { adExternalId: { spend, results, cpr, status } }
+  // ── Determine what data we need ───────────────────────────
+  const needsAdData = rules.some(r => r.scope === 'ad');
+  const needsAdSetData = rules.some(r => r.scope === 'ad_set');
+
+  // ── Fetch LIVE data — parallel per account ────────────────
+  const liveAdData = {};      // { externalId: { ...metrics, accessToken } }
+  const liveAdSetData = {};   // { externalId: { ...metrics, accessToken } }
 
   await Promise.all(accounts.map(async (account) => {
     try {
-      const [insights, adStatuses] = await Promise.all([
-        fetchLiveAdInsights(account.meta_account_id, account.access_token),
-        fetchAdStatuses(account.meta_account_id, account.access_token),
-      ]);
+      const fetches = [];
 
-      // Merge insights + statuses
-      for (const ad of insights) {
-        liveData[ad.adId] = {
-          ...ad,
-          status: adStatuses[ad.adId] || 'UNKNOWN',
-          accountId: account.meta_account_id,
-          accessToken: account.access_token,
-        };
+      if (needsAdData) {
+        fetches.push(
+          Promise.all([
+            fetchAllLiveInsights(account.meta_account_id, account.access_token, 'ad'),
+            fetchEntityStatuses(account.meta_account_id, account.access_token, 'ads'),
+          ]).then(([insights, statuses]) => {
+            mergeInsightsAndStatuses(insights, statuses, liveAdData, account);
+          })
+        );
       }
 
-      // Also add ads that have no insights (0 spend) but exist
-      for (const [adId, status] of Object.entries(adStatuses)) {
-        if (!liveData[adId]) {
-          liveData[adId] = {
-            adId,
-            adName: adId, // name unknown for 0-spend ads
-            spend: 0, results: 0, cpr: 0, impressions: 0,
-            status,
-            accountId: account.meta_account_id,
-            accessToken: account.access_token,
-          };
-        }
+      if (needsAdSetData) {
+        fetches.push(
+          Promise.all([
+            fetchAllLiveInsights(account.meta_account_id, account.access_token, 'adset'),
+            fetchEntityStatuses(account.meta_account_id, account.access_token, 'adsets'),
+          ]).then(([insights, statuses]) => {
+            mergeInsightsAndStatuses(insights, statuses, liveAdSetData, account);
+          })
+        );
       }
+
+      await Promise.all(fetches);
     } catch (err) {
       console.error(`[LiveMonitor] Failed to fetch for ${account.name}:`, err.message);
     }
   }));
 
-  // Evaluate each rule against live data
+  // ── Evaluate each rule ────────────────────────────────────
   const results = [];
 
   for (const rule of rules) {
     try {
-      const ruleResults = await evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap);
-      results.push({ rule: rule.name, ...ruleResults });
+      const dataMap = rule.scope === 'ad' ? liveAdData : liveAdSetData;
+      const ruleResults = await evaluateRuleAgainstLiveData(supabase, rule, dataMap, pausedMap);
+      results.push({ rule: rule.name, ruleId: rule.id, scope: rule.scope, ...ruleResults });
     } catch (err) {
       console.error(`[LiveMonitor] Rule "${rule.name}" error:`, err.message);
       results.push({ rule: rule.name, error: err.message });
@@ -122,228 +139,474 @@ export async function evaluateLiveRules() {
   const elapsed = Date.now() - startTime;
   const totalPaused = results.reduce((s, r) => s + (r.paused || 0), 0);
   const totalResumed = results.reduce((s, r) => s + (r.resumed || 0), 0);
+  const totalSkipped = results.reduce((s, r) => s + (r.skippedCooldown || 0) + (r.skippedMinSpend || 0), 0);
 
-  console.log(`[LiveMonitor] Done in ${elapsed}ms — ${totalPaused} paused, ${totalResumed} resumed`);
+  console.log(
+    `[LiveMonitor] Done in ${elapsed}ms — ` +
+    `${Object.keys(liveAdData).length} ads, ${Object.keys(liveAdSetData).length} ad-sets checked | ` +
+    `${totalPaused} paused, ${totalResumed} resumed, ${totalSkipped} skipped`
+  );
 
   return {
-    evaluated: Object.keys(liveData).length,
+    evaluated: Object.keys(liveAdData).length + Object.keys(liveAdSetData).length,
     rules: rules.length,
     paused: totalPaused,
     resumed: totalResumed,
+    skipped: totalSkipped,
     elapsed_ms: elapsed,
     results,
   };
 }
 
+
+// =============================================================
+// RULE EVALUATION — The core logic
+// =============================================================
+
 /**
- * Evaluate a single rule against all live ad data
+ * Evaluate a single rule against all live entity data.
+ * Handles: pause, resume, cooldown (pause-only), min spend, kill switch.
  */
 async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) {
   let paused = 0;
   let resumed = 0;
+  let skippedCooldown = 0;
+  let skippedMinSpend = 0;
+  let checked = 0;
 
-  // Determine which conditions matter
   const conditions = rule.conditions || [];
+  if (!conditions.length) return { paused, resumed, skippedCooldown, skippedMinSpend, checked };
 
-  for (const [adId, ad] of Object.entries(liveData)) {
-    // If rule has specific targets, skip non-matching ads
-    if (rule.target_ids?.length) {
-      // target_ids might be DB UUIDs — we need to match by external_id
-      // For now, rules should store external IDs in target_external_ids
-      if (rule.target_external_ids?.length && !rule.target_external_ids.includes(adId)) {
-        continue;
-      }
+  const minSpend = parseFloat(rule.min_spend_threshold) || DEFAULT_MIN_SPEND;
+  const isKillSwitch = rule.action_type === 'kill_switch';
+
+  for (const [entityId, entity] of Object.entries(liveData)) {
+    // ── Target filtering ────────────────────────────────────
+    if (rule.target_external_ids?.length && !rule.target_external_ids.includes(entityId)) {
+      continue;
     }
 
-    // Check if ALL conditions are met
-    const allMet = conditions.every(cond => {
-      const value = getMetricValue(ad, cond.metric);
+    checked++;
+    const isPausedByUs = !!pausedMap[entityId];
+
+    // ── MIN SPEND GUARD ─────────────────────────────────────
+    // Don't evaluate metrics-based rules on low-data entities
+    // (prevents CPC=Infinity on $0.10 spend / 0 clicks)
+    if (entity.spend < minSpend && !isPausedByUs) {
+      skippedMinSpend++;
+      continue;
+    }
+
+    // ── Evaluate ALL conditions (AND logic) ─────────────────
+    const allConditionsMet = conditions.every(cond => {
+      const value = getMetricValue(entity, cond.metric);
       return evaluateCondition(value, cond.operator, parseFloat(cond.value));
     });
 
-    const isPausedByUs = !!pausedMap[adId];
+    // ── CASE 1: Conditions met + entity is running → PAUSE ──
+    if (allConditionsMet && !isPausedByUs) {
+      // Only pause entities that are currently ACTIVE on Meta's side
+      if (entity.status !== 'ACTIVE') continue;
 
-    if (allMet && !isPausedByUs && ad.status === 'ACTIVE') {
-      // CONDITIONS MET + ad is active → PAUSE IT
-      try {
-        await pauseAd(adId, ad.accessToken);
-
-        // Record in tracking table
-        await supabase.from('automation_paused_ads').insert({
-          ad_external_id: adId,
-          ad_name: ad.adName,
-          rule_id: rule.id,
-          rule_name: rule.name,
-          reason: rule.action_type || 'threshold',
-          metric_snapshot: {
-            spend: ad.spend,
-            results: ad.results,
-            cpr: ad.cpr,
-            impressions: ad.impressions,
-          },
-        });
-
-        // Log + notify
-        await logLiveAction(supabase, rule, adId, ad, 'paused');
-        paused++;
-        console.log(`[LiveMonitor] PAUSED ad "${ad.adName}" (CPR: ${ad.cpr}, Spend: $${ad.spend})`);
-      } catch (err) {
-        console.error(`[LiveMonitor] Failed to pause ${adId}:`, err.message);
+      // Check cooldown — only for PAUSE actions
+      const cooldownMinutes = rule.cooldown_minutes || 0;
+      if (cooldownMinutes > 0) {
+        const canPause = await checkPauseCooldown(supabase, rule.id, entityId, cooldownMinutes);
+        if (!canPause) {
+          skippedCooldown++;
+          continue;
+        }
       }
 
-    } else if (!allMet && isPausedByUs) {
-      // CONDITIONS NO LONGER MET + we paused it → RESUME IT (auto-resume!)
-      // But ONLY for threshold rules, not kill_switch
-      if (rule.action_type === 'kill_switch') continue; // Never auto-resume kill switch
+      // ── EXECUTE PAUSE ───────────────────────────────────
+      try {
+        const pauseFn = rule.scope === 'ad' ? pauseEntity : pauseEntity;
+        await retryWithBackoff(() => pauseFn(entityId, entity.accessToken));
+
+        // Track in paused_ads (upsert to prevent duplicates)
+        await supabase.from('automation_paused_ads').upsert({
+          ad_external_id: entityId,
+          ad_name: entity.entityName,
+          rule_id: rule.id,
+          rule_name: rule.name,
+          reason: isKillSwitch ? 'kill_switch' : 'threshold',
+          metric_snapshot: buildSnapshot(entity),
+          paused_at: new Date().toISOString(),
+          resumed_at: null,
+          is_paused: true,
+        }, {
+          onConflict: 'ad_external_id',
+          ignoreDuplicates: false,
+        });
+
+        await logLiveAction(supabase, rule, entityId, entity, 'paused');
+        paused++;
+
+        console.log(
+          `[LiveMonitor] ⏸️  PAUSED ${rule.scope} "${entity.entityName}" ` +
+          `(CPR: $${entity.cpr?.toFixed(2)}, CPC: $${entity.cpc?.toFixed(2)}, Spend: $${entity.spend?.toFixed(2)})`
+        );
+      } catch (err) {
+        console.error(`[LiveMonitor] Failed to pause ${entityId}:`, err.message);
+        await logLiveAction(supabase, rule, entityId, entity, 'failed', err.message);
+      }
+
+    // ── CASE 2: Conditions NO LONGER met + WE paused it → RESUME ──
+    // Checked EVERY 60 seconds — no resume cooldown!
+    } else if (!allConditionsMet && isPausedByUs) {
+      // NEVER auto-resume kill_switch rules
+      if (isKillSwitch) continue;
+
+      // Also check: did the SAME rule pause it?
+      // Only resume if the rule that paused it is the one that no longer matches
+      const pauseRecord = pausedMap[entityId];
+      if (pauseRecord.rule_id !== rule.id) continue;
+
+      // If spend dropped below min_spend, still resume (it was paused for a reason, now metrics recovered)
+      // We check conditions against current live data regardless
 
       try {
-        await enableAd(adId, ad.accessToken);
+        await retryWithBackoff(() => enableEntity(entityId, entity.accessToken));
 
         // Update tracking
         await supabase.from('automation_paused_ads')
-          .update({ is_paused: false, resumed_at: new Date().toISOString() })
-          .eq('ad_external_id', adId)
+          .update({
+            is_paused: false,
+            resumed_at: new Date().toISOString(),
+          })
+          .eq('ad_external_id', entityId)
           .eq('is_paused', true);
 
-        await logLiveAction(supabase, rule, adId, ad, 'resumed');
+        await logLiveAction(supabase, rule, entityId, entity, 'resumed');
         resumed++;
-        console.log(`[LiveMonitor] RESUMED ad "${ad.adName}" (CPR: ${ad.cpr}, Spend: $${ad.spend})`);
+
+        console.log(
+          `[LiveMonitor] ▶️  RESUMED ${rule.scope} "${entity.entityName}" ` +
+          `(CPR: $${entity.cpr?.toFixed(2)}, CPC: $${entity.cpc?.toFixed(2)}, Spend: $${entity.spend?.toFixed(2)})`
+        );
       } catch (err) {
-        console.error(`[LiveMonitor] Failed to resume ${adId}:`, err.message);
+        console.error(`[LiveMonitor] Failed to resume ${entityId}:`, err.message);
+        await logLiveAction(supabase, rule, entityId, entity, 'failed', err.message);
       }
     }
   }
 
-  return { paused, resumed };
+  return { paused, resumed, skippedCooldown, skippedMinSpend, checked };
 }
 
+
+// =============================================================
+// COOLDOWN — Only applies to PAUSE, not resume
+// =============================================================
+
 /**
- * Get a metric value from live ad data
+ * Check if enough time has passed since the last pause action for this rule+entity.
+ * Returns true if we CAN pause (cooldown expired), false if still cooling down.
  */
-function getMetricValue(ad, metric) {
+async function checkPauseCooldown(supabase, ruleId, entityExternalId, cooldownMinutes) {
+  const { data: lastAction } = await supabase
+    .from('automation_logs')
+    .select('created_at')
+    .eq('rule_id', ruleId)
+    .eq('entity_external_id', entityExternalId)
+    .eq('action_type', 'pause_ad')
+    .eq('status', 'executed')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
+
+  if (!lastAction) return true; // No previous pause — go ahead
+
+  const minutesSince = (Date.now() - new Date(lastAction.created_at).getTime()) / 60000;
+  return minutesSince >= cooldownMinutes;
+}
+
+
+// =============================================================
+// METRICS — Extract values from live data with NaN guards
+// =============================================================
+
+/**
+ * Get a metric value from live entity data.
+ * All computed metrics return 0 (not NaN/Infinity) when denominator is 0.
+ */
+function getMetricValue(entity, metric) {
   switch (metric) {
-    case 'spend': return ad.spend;
-    case 'cpr': case 'cost_per_result': return ad.cpr;
-    case 'results': case 'conversions': return ad.results;
-    case 'impressions': return ad.impressions;
-    case 'cpc': return ad.impressions > 0 ? ad.spend / ad.clicks : 0;
-    case 'ctr': return ad.impressions > 0 ? (ad.clicks / ad.impressions) * 100 : 0;
-    case 'cpm': return ad.impressions > 0 ? (ad.spend / ad.impressions) * 1000 : 0;
-    default: return 0;
+    case 'spend':
+      return entity.spend || 0;
+    case 'cpr': case 'cost_per_result':
+      return entity.cpr || 0;
+    case 'results': case 'conversions':
+      return entity.results || 0;
+    case 'impressions':
+      return entity.impressions || 0;
+    case 'clicks':
+      return entity.clicks || 0;
+    case 'cpc':
+      return entity.cpc || 0;
+    case 'ctr':
+      return entity.ctr || 0;
+    case 'cpm':
+      return entity.cpm || 0;
+    default:
+      return 0;
   }
 }
 
 /**
- * Evaluate a single condition
+ * Evaluate a single condition: actual [operator] expected
  */
 function evaluateCondition(actual, operator, expected) {
+  // Guard against NaN
+  if (isNaN(actual) || isNaN(expected)) return false;
+
   switch (operator) {
-    case '>': return actual > expected;
-    case '<': return actual < expected;
+    case '>':  return actual > expected;
+    case '<':  return actual < expected;
     case '>=': return actual >= expected;
     case '<=': return actual <= expected;
-    case '=': case '==': return actual === expected;
+    case '=':  case '==': return actual === expected;
     case '!=': return actual !== expected;
-    default: return false;
+    default:   return false;
   }
 }
 
+
+// =============================================================
+// META API — Pause/Enable with retry
+// =============================================================
+
 /**
- * Log a live monitoring action
+ * Pause any entity (ad, ad set, campaign) via Meta API
  */
-async function logLiveAction(supabase, rule, adId, ad, action) {
+async function pauseEntity(entityId, accessToken) {
+  const res = await fetch(`${META_GRAPH_URL}/${entityId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'PAUSED', access_token: accessToken }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || `Pause failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Enable any entity (ad, ad set, campaign) via Meta API
+ */
+async function enableEntity(entityId, accessToken) {
+  const res = await fetch(`${META_GRAPH_URL}/${entityId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'ACTIVE', access_token: accessToken }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || `Enable failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Retry a function up to 3 times with exponential backoff (1s, 2s, 4s).
+ * Critical for Meta API reliability — rate limits, network blips, etc.
+ */
+async function retryWithBackoff(fn, maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt === maxRetries) throw err;
+      const delay = Math.pow(2, attempt - 1) * 1000; // 1s, 2s, 4s
+      console.warn(`[LiveMonitor] Retry ${attempt}/${maxRetries} in ${delay}ms: ${err.message}`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+
+
+// =============================================================
+// LOGGING & NOTIFICATIONS
+// =============================================================
+
+async function logLiveAction(supabase, rule, entityId, entity, action, errorMessage = null) {
+  const actionType = action === 'paused' ? 'pause_ad'
+    : action === 'resumed' ? 'enable_ad'
+    : rule.action_type;
+
+  const status = action === 'failed' ? 'failed' : 'executed';
+
   await supabase.from('automation_logs').insert({
     rule_id: rule.id,
     rule_name: rule.name,
-    entity_type: 'ad',
-    entity_external_id: adId,
-    entity_name: ad.adName,
-    action_type: action === 'paused' ? 'pause_ad' : 'enable_ad',
+    entity_type: rule.scope,
+    entity_id: null,  // Live rules use external IDs, not DB UUIDs
+    entity_external_id: entityId,
+    entity_name: entity.entityName,
+    action_type: actionType,
     action_params: {},
-    condition_snapshot: {
-      spend: ad.spend,
-      results: ad.results,
-      cpr: ad.cpr,
-      impressions: ad.impressions,
-      evaluated_at: new Date().toISOString(),
-    },
-    status: 'executed',
+    condition_snapshot: buildSnapshot(entity),
+    status,
+    error_message: errorMessage,
   });
 
-  await supabase.from('notifications').insert({
-    type: 'automation_fired',
-    title: action === 'paused'
-      ? `⏸️ Auto-Paused: ${ad.adName}`
-      : `▶️ Auto-Resumed: ${ad.adName}`,
-    message: `Rule "${rule.name}" — CPR: $${ad.cpr?.toFixed(2)}, Spend: $${ad.spend?.toFixed(2)}, Results: ${ad.results}`,
-    severity: action === 'paused' ? 'warning' : 'success',
-    metadata: { rule_id: rule.id, ad_id: adId },
-  });
+  if (action !== 'failed') {
+    const title = action === 'paused'
+      ? `⏸️ Auto-Paused: ${entity.entityName}`
+      : `▶️ Auto-Resumed: ${entity.entityName}`;
+    const severity = action === 'paused' ? 'warning' : 'success';
+
+    await supabase.from('notifications').insert({
+      type: 'automation_fired',
+      title,
+      message: buildNotificationMessage(rule, entity),
+      severity,
+      metadata: { rule_id: rule.id, entity_id: entityId, action },
+    });
+  }
 }
 
+function buildSnapshot(entity) {
+  return {
+    spend: entity.spend,
+    results: entity.results,
+    cpr: entity.cpr,
+    cpc: entity.cpc,
+    ctr: entity.ctr,
+    cpm: entity.cpm,
+    impressions: entity.impressions,
+    clicks: entity.clicks,
+    evaluated_at: new Date().toISOString(),
+  };
+}
+
+function buildNotificationMessage(rule, entity) {
+  const parts = [];
+  parts.push(`Rule "${rule.name}"`);
+  if (entity.cpr > 0) parts.push(`CPR: $${entity.cpr.toFixed(2)}`);
+  if (entity.cpc > 0) parts.push(`CPC: $${entity.cpc.toFixed(2)}`);
+  parts.push(`Spend: $${entity.spend.toFixed(2)}`);
+  if (entity.results > 0) parts.push(`Results: ${entity.results}`);
+  return parts.join(' — ');
+}
+
+
 // =============================================================
-// LIVE DATA FETCHERS — 1 API call each per account
+// LIVE DATA FETCHERS — Full pagination, all metrics computed
 // =============================================================
 
 /**
- * Fetch today's ad-level insights (spend, results, CPR) — 1 API call
+ * Merge insights + statuses into a single data map.
+ * Computes CPC, CTR, CPM, CPR with NaN/Infinity guards.
  */
-async function fetchLiveAdInsights(accountId, accessToken) {
-  const today = new Date().toISOString().split('T')[0];
-
-  const fields = 'ad_id,ad_name,spend,impressions,clicks,actions';
-  const timeRange = JSON.stringify({ since: today, until: today });
-
-  const res = await fetch(
-    `${META_GRAPH_URL}/act_${accountId}/insights?` +
-    `fields=${fields}` +
-    `&level=ad` +
-    `&time_range=${encodeURIComponent(timeRange)}` +
-    `&limit=500` +
-    `&access_token=${accessToken}`
-  );
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error?.message || `Insights failed: ${res.status}`);
+function mergeInsightsAndStatuses(insights, statuses, dataMap, account) {
+  for (const item of insights) {
+    dataMap[item.entityId] = {
+      ...item,
+      status: statuses[item.entityId] || 'UNKNOWN',
+      accountId: account.meta_account_id,
+      accessToken: account.access_token,
+    };
   }
 
-  const { data } = await res.json();
-  if (!data?.length) return [];
+  // Also add entities with 0 spend (exist but no insights today)
+  for (const [entityId, status] of Object.entries(statuses)) {
+    if (!dataMap[entityId]) {
+      dataMap[entityId] = {
+        entityId,
+        entityName: entityId,
+        spend: 0, results: 0, cpr: 0, impressions: 0, clicks: 0,
+        cpc: 0, ctr: 0, cpm: 0,
+        status,
+        accountId: account.meta_account_id,
+        accessToken: account.access_token,
+      };
+    }
+  }
+}
 
-  return data.map(row => {
+/**
+ * Fetch ALL today's insights with FULL PAGINATION.
+ * level = 'ad' or 'adset'
+ * Returns array of { entityId, entityName, spend, results, cpr, cpc, ctr, cpm, impressions, clicks }
+ */
+async function fetchAllLiveInsights(accountId, accessToken, level = 'ad') {
+  const today = new Date().toISOString().split('T')[0];
+  const idField = level === 'ad' ? 'ad_id' : 'adset_id';
+  const nameField = level === 'ad' ? 'ad_name' : 'adset_name';
+
+  const fields = `${idField},${nameField},spend,impressions,clicks,actions`;
+  const timeRange = JSON.stringify({ since: today, until: today });
+
+  let url = `${META_GRAPH_URL}/act_${accountId}/insights?` +
+    `fields=${fields}` +
+    `&level=${level}` +
+    `&time_range=${encodeURIComponent(timeRange)}` +
+    `&limit=500` +
+    `&access_token=${accessToken}`;
+
+  const allRows = [];
+
+  // ── Full pagination — get EVERY entity, not just first 500 ──
+  while (url) {
+    const res = await fetch(url);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error?.message || `Insights failed: ${res.status}`);
+    }
+    const json = await res.json();
+    if (json.data?.length) allRows.push(...json.data);
+    url = json.paging?.next || null;
+  }
+
+  return allRows.map(row => {
     const spend = parseFloat(row.spend || '0');
+    const impressions = parseInt(row.impressions || '0');
+    const clicks = parseInt(row.clicks || '0');
     const results = extractConversions(row.actions);
+
+    // Computed metrics — ALL guarded against NaN/Infinity
+    const cpc = clicks > 0 ? +(spend / clicks).toFixed(4) : 0;
+    const ctr = impressions > 0 ? +((clicks / impressions) * 100).toFixed(4) : 0;
+    const cpm = impressions > 0 ? +((spend / impressions) * 1000).toFixed(4) : 0;
+    const cpr = results > 0 ? +(spend / results).toFixed(2) : (spend > 0 ? 999999 : 0);
+    // ↑ CPR: If spending but 0 results, set to 999999 (effectively infinity, triggers any "cpr > X" rule)
+    //   If 0 spend, set to 0 (won't trigger any rule)
+
     return {
-      adId: row.ad_id,
-      adName: row.ad_name,
-      spend,
-      results,
-      cpr: results > 0 ? +(spend / results).toFixed(2) : (spend > 0 ? Infinity : 0),
-      impressions: parseInt(row.impressions || '0'),
-      clicks: parseInt(row.clicks || '0'),
+      entityId: row[idField],
+      entityName: row[nameField],
+      spend, impressions, clicks, results,
+      cpc, ctr, cpm, cpr,
     };
   });
 }
 
 /**
- * Fetch all ad statuses — 1 API call
+ * Fetch all entity statuses — FULL PAGINATION.
+ * type = 'ads' or 'adsets'
+ * Returns { entityId: 'ACTIVE' | 'PAUSED' | ... }
  */
-async function fetchAdStatuses(accountId, accessToken) {
-  const res = await fetch(
-    `${META_GRAPH_URL}/act_${accountId}/ads?fields=id,status&limit=500&access_token=${accessToken}`
-  );
-  if (!res.ok) return {};
-  const { data } = await res.json();
+async function fetchEntityStatuses(accountId, accessToken, type = 'ads') {
+  let url = `${META_GRAPH_URL}/act_${accountId}/${type}?fields=id,name,status&limit=500&access_token=${accessToken}`;
   const map = {};
-  for (const ad of (data || [])) {
-    map[ad.id] = ad.status;
+
+  while (url) {
+    const res = await fetch(url);
+    if (!res.ok) return map; // Don't crash on status fetch failure
+    const json = await res.json();
+    for (const entity of (json.data || [])) {
+      map[entity.id] = entity.status;
+    }
+    url = json.paging?.next || null;
   }
+
   return map;
 }
 
 /**
- * Extract conversions from Meta actions array (same logic as meta-api.js)
+ * Extract conversions from Meta actions array using priority order
  */
 function extractConversions(actions) {
   if (!actions || !Array.isArray(actions)) return 0;

@@ -120,27 +120,32 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_metrics_unique_entity_date
         COALESCE(ad_id, '00000000-0000-0000-0000-000000000000'::UUID));
 
 CREATE TABLE IF NOT EXISTS automation_rules (
-    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name                TEXT NOT NULL,
-    description         TEXT,
-    is_active           BOOLEAN DEFAULT true,
-    scope               TEXT NOT NULL CHECK (scope IN ('campaign', 'ad_set', 'ad')),
-    target_ids          UUID[],
-    target_account_ids  UUID[],
-    conditions          JSONB NOT NULL,
-    action_type         TEXT NOT NULL CHECK (action_type IN (
-                            'pause_campaign', 'enable_campaign',
-                            'increase_budget', 'decrease_budget', 'set_budget',
-                            'send_alert')),
-    action_params       JSONB,
-    cooldown_minutes    INT DEFAULT 360,
-    max_triggers_per_day INT DEFAULT 2,
-    requires_approval   BOOLEAN DEFAULT false,
-    dry_run             BOOLEAN DEFAULT false,
-    last_triggered_at   TIMESTAMPTZ,
-    trigger_count       INT DEFAULT 0,
-    created_at          TIMESTAMPTZ DEFAULT now(),
-    updated_at          TIMESTAMPTZ DEFAULT now()
+    id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name                  TEXT NOT NULL,
+    description           TEXT,
+    is_active             BOOLEAN DEFAULT true,
+    scope                 TEXT NOT NULL CHECK (scope IN ('campaign', 'ad_set', 'ad')),
+    target_ids            UUID[],
+    target_account_ids    UUID[],
+    target_external_ids   TEXT[],   -- For live rules: Meta external IDs to target
+    conditions            JSONB NOT NULL,
+    action_type           TEXT NOT NULL CHECK (action_type IN (
+                              'pause_campaign', 'enable_campaign',
+                              'increase_budget', 'decrease_budget', 'set_budget',
+                              'send_alert',
+                              'auto_pause_resume', 'kill_switch',
+                              'pause_ad', 'enable_ad',
+                              'pause_ad_set', 'enable_ad_set')),
+    action_params         JSONB,
+    cooldown_minutes      INT DEFAULT 15,
+    max_triggers_per_day  INT DEFAULT 50,
+    min_spend_threshold   NUMERIC(10,2) DEFAULT 1.00,
+    requires_approval     BOOLEAN DEFAULT false,
+    dry_run               BOOLEAN DEFAULT false,
+    last_triggered_at     TIMESTAMPTZ,
+    trigger_count         INT DEFAULT 0,
+    created_at            TIMESTAMPTZ DEFAULT now(),
+    updated_at            TIMESTAMPTZ DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS automation_logs (
@@ -148,7 +153,7 @@ CREATE TABLE IF NOT EXISTS automation_logs (
     rule_id             UUID NOT NULL REFERENCES automation_rules(id) ON DELETE CASCADE,
     rule_name           TEXT NOT NULL,
     entity_type         TEXT NOT NULL,
-    entity_id           UUID NOT NULL,
+    entity_id           UUID,       -- Nullable for live rules (they use external IDs)
     entity_external_id  TEXT NOT NULL,
     entity_name         TEXT,
     action_type         TEXT NOT NULL,
@@ -157,7 +162,8 @@ CREATE TABLE IF NOT EXISTS automation_logs (
     status              TEXT NOT NULL CHECK (status IN (
                             'executed', 'failed', 'skipped_cooldown',
                             'skipped_max_triggers', 'pending_approval',
-                            'dry_run', 'manually_overridden')),
+                            'dry_run', 'manually_overridden',
+                            'skipped_min_spend')),
     error_message       TEXT,
     api_response        JSONB,
     previous_value      JSONB,

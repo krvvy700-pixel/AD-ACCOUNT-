@@ -27,12 +27,14 @@ export async function POST(request) {
       conditions: body.conditions,
       action_type: body.action_type,
       action_params: body.action_params,
-      cooldown_minutes: body.cooldown_minutes || 360,
-      max_triggers_per_day: body.max_triggers_per_day || 2,
+      cooldown_minutes: body.cooldown_minutes ?? 60,
+      max_triggers_per_day: body.max_triggers_per_day || 10,
+      min_spend_threshold: body.min_spend_threshold ?? 1.00,
       requires_approval: body.requires_approval || false,
       dry_run: body.dry_run || false,
       target_ids: body.target_ids || null,
       target_account_ids: body.target_account_ids || null,
+      target_external_ids: body.target_external_ids || null,
     })
     .select()
     .single();
