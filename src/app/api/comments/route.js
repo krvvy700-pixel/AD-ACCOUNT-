@@ -259,35 +259,49 @@ export async function POST(request) {
   for (const account of accounts) {
     try {
       const { pages, igMap } = await getPageTokens(account.access_token);
-      let token = account.access_token;
+      
+      const possibleTokens = [];
       if (isIG) {
-        token = getIgToken(null, pages, igMap, account.access_token);
+        // Collect all tokens that manage IG accounts
+        for (const igId of Object.keys(igMap)) {
+          const pId = igMap[igId];
+          if (pages[pId]?.token) possibleTokens.push(pages[pId].token);
+        }
+        if (possibleTokens.length === 0) possibleTokens.push(account.access_token);
       } else {
         const commentPageId = (postId || commentId).split('_')[0];
-        token = pages[commentPageId]?.token || Object.values(pages)[0]?.token || account.access_token;
+        possibleTokens.push(pages[commentPageId]?.token || Object.values(pages)[0]?.token || account.access_token);
       }
 
-      let res;
-      if (action === 'reply') {
-        if (!message) return NextResponse.json({ error: 'Message required' }, { status: 400 });
-        res = await fetch(`${META_GRAPH_URL}/${commentId}/${isIG ? 'replies' : 'comments'}`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message, access_token: token }),
-        });
-      } else if (action === 'hide' || action === 'unhide') {
-        const hidePayload = isIG ? { hide: action === 'hide' } : { is_hidden: action === 'hide' };
-        res = await fetch(`${META_GRAPH_URL}/${commentId}`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...hidePayload, access_token: token }),
-        });
-      } else if (action === 'delete') {
-        res = await fetch(`${META_GRAPH_URL}/${commentId}?access_token=${token}`, { method: 'DELETE' });
-      } else {
-        return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
+      let res = null;
+      let success = false;
+      for (const t of possibleTokens) {
+        if (action === 'reply') {
+          if (!message) return NextResponse.json({ error: 'Message required' }, { status: 400 });
+          res = await fetch(`${META_GRAPH_URL}/${commentId}/${isIG ? 'replies' : 'comments'}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message, access_token: t }),
+          });
+        } else if (action === 'hide' || action === 'unhide') {
+          const hidePayload = isIG ? { hide: action === 'hide' } : { is_hidden: action === 'hide' };
+          res = await fetch(`${META_GRAPH_URL}/${commentId}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...hidePayload, access_token: t }),
+          });
+        } else if (action === 'delete') {
+          res = await fetch(`${META_GRAPH_URL}/${commentId}?access_token=${t}`, { method: 'DELETE' });
+        } else {
+          return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
+        }
+        
+        if (res.ok) {
+          success = true;
+          break;
+        }
       }
 
-      if (res.ok) return NextResponse.json({ success: true, action });
-      const err = await res.json().catch(() => ({}));
+      if (success) return NextResponse.json({ success: true, action });
+      const err = res ? await res.json().catch(() => ({})) : {};
       lastError = err.error?.message || `${action} failed`;
       continue;
     } catch (e) { lastError = e.message; continue; }

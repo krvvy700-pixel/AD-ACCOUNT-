@@ -239,11 +239,15 @@ export default function CommentsPage() {
           ));
         }
       } else {
-        const err = await res.json();
+        let err;
+        try { err = await res.json(); } catch { err = { error: 'Unknown server error' }; }
         alert(err.error || `${action} failed`);
       }
-    } catch {}
-    setActionLoading(l => ({ ...l, [commentId]: null }));
+    } catch (e) {
+      alert(`${action} failed due to network error`);
+    } finally {
+      setActionLoading(l => ({ ...l, [commentId]: null }));
+    }
   };
 
   return (
