@@ -114,14 +114,14 @@ export default function CommentsPage() {
     : null;
 
   // Handle reply
-  const handleReply = async (commentId, postId) => {
+  const handleReply = async (commentId, postId, platform) => {
     if (!replyText.trim()) return;
     setReplyLoading(true);
     try {
       const res = await fetch('/api/comments', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ commentId, action: 'reply', message: replyText, postId }),
+        body: JSON.stringify({ commentId, action: 'reply', message: replyText, postId, platform }),
       });
       if (res.ok) {
         setReplyingTo(null);
@@ -136,13 +136,13 @@ export default function CommentsPage() {
   };
 
   // Handle hide/delete
-  const handleAction = async (commentId, action, postId) => {
+  const handleAction = async (commentId, action, postId, platform) => {
     setActionLoading(l => ({ ...l, [commentId]: action }));
     try {
       const res = await fetch('/api/comments', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ commentId, action, postId }),
+        body: JSON.stringify({ commentId, action, postId, platform }),
       });
       if (res.ok) {
         if (action === 'delete') {
@@ -455,7 +455,7 @@ export default function CommentsPage() {
                       className="p-1.5 rounded-md bg-primary/10 text-primary hover:bg-primary/20 transition-colors" title="Reply">
                       <Send size={12} />
                     </button>
-                    <button onClick={() => handleAction(comment.id, comment.isHidden ? 'unhide' : 'hide', comment.postId)}
+                    <button onClick={() => handleAction(comment.id, comment.isHidden ? 'unhide' : 'hide', comment.postId, comment.platform)}
                       disabled={!!actionLoading[comment.id]}
                       className="p-1.5 rounded-md bg-warning/10 text-warning hover:bg-warning/20 transition-colors disabled:opacity-50"
                       title={comment.isHidden ? 'Unhide' : 'Hide'}>
@@ -463,7 +463,7 @@ export default function CommentsPage() {
                         ? <Loader2 size={12} className="animate-spin" />
                         : comment.isHidden ? <Eye size={12} /> : <EyeOff size={12} />}
                     </button>
-                    <button onClick={() => { if (confirm('Delete this comment?')) handleAction(comment.id, 'delete', comment.postId); }}
+                    <button onClick={() => { if (confirm('Delete this comment?')) handleAction(comment.id, 'delete', comment.postId, comment.platform); }}
                       disabled={!!actionLoading[comment.id]}
                       className="p-1.5 rounded-md bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors disabled:opacity-50" title="Delete">
                       {actionLoading[comment.id] === 'delete'
@@ -495,10 +495,10 @@ export default function CommentsPage() {
                 <div className="flex items-center gap-2 ml-[52px] mt-3">
                   <input value={replyText} onChange={e => setReplyText(e.target.value)}
                     placeholder="Write a reply..."
-                    onKeyDown={e => e.key === 'Enter' && handleReply(comment.id, comment.postId)}
+                    onKeyDown={e => e.key === 'Enter' && handleReply(comment.id, comment.postId, comment.platform)}
                     className="flex-1 px-3 py-2 text-sm border border-border rounded-lg bg-surface text-foreground focus:outline-none focus:ring-2 focus:ring-primary/20"
                     autoFocus />
-                  <button onClick={() => handleReply(comment.id, comment.postId)} disabled={replyLoading || !replyText.trim()}
+                  <button onClick={() => handleReply(comment.id, comment.postId, comment.platform)} disabled={replyLoading || !replyText.trim()}
                     className="px-3 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:opacity-50">
                     {replyLoading ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
                   </button>
