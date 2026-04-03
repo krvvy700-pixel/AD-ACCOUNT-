@@ -3,7 +3,11 @@ import { useState, useEffect, useCallback, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import AppShell from '@/components/AppShell';
 import { useCurrency } from '@/context/CurrencyContext';
-import { Zap, Plus, Play, Pause, Edit2, Trash2, Clock, Shield, RotateCcw, X, AlertTriangle, Activity } from 'lucide-react';
+import {
+  Zap, Plus, Play, Pause, Edit2, Trash2, Clock, Shield, RotateCcw, X,
+  AlertTriangle, Activity, Search, ChevronDown, Image, CheckSquare,
+  Loader2, Eye,
+} from 'lucide-react';
 
 export default function AutomationPage() {
   return (
@@ -25,19 +29,26 @@ function AutomationContent() {
   const [prefilledCampaign, setPrefilledCampaign] = useState(null);
   const [lastEvaluation, setLastEvaluation] = useState(null);
 
+  // Paused ads state
+  const [pausedAds, setPausedAds] = useState([]);
+  const [pausedLoading, setPausedLoading] = useState(false);
+  const [resumingId, setResumingId] = useState(null);
+
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [rulesRes, logsRes] = await Promise.all([
+      const [rulesRes, logsRes, pausedRes] = await Promise.all([
         fetch('/api/automation/rules'),
         fetch('/api/automation/logs?limit=30'),
+        fetch('/api/automation/paused'),
       ]);
       const rulesData = await rulesRes.json();
       const logsData = await logsRes.json();
+      const pausedData = await pausedRes.json();
       if (rulesData.rules) setRules(rulesData.rules);
       if (logsData.logs) setLogs(logsData.logs);
+      if (pausedData.paused) setPausedAds(pausedData.paused);
 
-      // Determine last evaluation from most recent log
       if (logsData.logs?.length > 0) {
         setLastEvaluation(logsData.logs[0].created_at);
       }
@@ -47,13 +58,13 @@ function AutomationContent() {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // Auto-refresh every 30s to see latest logs
+  // Auto-refresh every 30s
   useEffect(() => {
     const interval = setInterval(fetchData, 30000);
     return () => clearInterval(interval);
   }, [fetchData]);
 
-  // Auto-open modal if campaign param is present (from dashboard "Add Rule" button)
+  // Auto-open modal if campaign param is present
   useEffect(() => {
     const campaignId = searchParams.get('campaign');
     const campaignName = searchParams.get('name');
@@ -89,10 +100,32 @@ function AutomationContent() {
     fetchData();
   };
 
+  // Manual resume a paused ad
+  const handleManualResume = async (adExternalId) => {
+    if (!confirm('Resume this ad? It will be set to ACTIVE on Meta.')) return;
+    setResumingId(adExternalId);
+    try {
+      const res = await fetch('/api/automation/paused', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adExternalId }),
+      });
+      if (res.ok) {
+        setPausedAds(prev => prev.filter(p => p.ad_external_id !== adExternalId));
+      } else {
+        const err = await res.json();
+        alert(err.error || 'Resume failed');
+      }
+    } catch {
+      alert('Resume failed');
+    }
+    setResumingId(null);
+  };
+
   const fmtAction = (type, params) => ({
     pause_campaign: '⏸ Pause Campaign',
     enable_campaign: '▶ Enable Campaign',
-    auto_pause_resume: '🔄 Auto Pause + Resume',
+    auto_pause_resume: '🔄 Auto Pause & Resume',
     kill_switch: '💀 Kill (no resume)',
     pause_ad: '⏸ Pause Ad',
     enable_ad: '▶ Enable Ad',
@@ -128,6 +161,12 @@ function AutomationContent() {
                 {liveRulesCount} live (every 60s)
               </span>
             )}
+            {pausedAds.length > 0 && (
+              <span className="flex items-center gap-1 text-warning">
+                <Pause size={10} />
+                {pausedAds.length} ads auto-paused
+              </span>
+            )}
             {lastEvaluation && (
               <span>Last check: {timeAgo(lastEvaluation)}</span>
             )}
@@ -148,6 +187,51 @@ function AutomationContent() {
         </div>
       </div>
 
+      {/* Auto-Paused Ads Section */}
+      {pausedAds.length > 0 && (
+        <div className="bg-card rounded-xl border border-warning/30 shadow-card mb-6 overflow-hidden">
+          <div className="px-5 py-3 border-b border-border bg-warning/5 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+              <Pause size={14} className="text-warning" /> Auto-Paused Ads
+              <span className="text-xs font-normal text-muted-foreground">({pausedAds.length})</span>
+            </h3>
+            <span className="text-[10px] text-muted-foreground">Auto-resume checks every 60s</span>
+          </div>
+          <div className="divide-y divide-border">
+            {pausedAds.map(p => (
+              <div key={p.id} className="flex items-center justify-between px-5 py-3 hover:bg-muted/30 transition-colors">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm font-medium text-foreground truncate">{p.ad_name || p.ad_external_id}</span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-warning/10 text-warning font-medium">
+                      {p.reason === 'kill_switch' ? '💀 Kill Switch' : '⏸ Threshold'}
+                    </span>
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-3">
+                    <span>Rule: {p.rule_name}</span>
+                    <span>Paused: {timeAgo(p.paused_at)}</span>
+                    {p.metric_snapshot?.cpr > 0 && <span>CPR: ${parseFloat(p.metric_snapshot.cpr).toFixed(2)}</span>}
+                    {p.metric_snapshot?.cpc > 0 && <span>CPC: ${parseFloat(p.metric_snapshot.cpc).toFixed(2)}</span>}
+                    {p.metric_snapshot?.spend > 0 && <span>Spend: ${parseFloat(p.metric_snapshot.spend).toFixed(2)}</span>}
+                  </div>
+                </div>
+                <button
+                  onClick={() => handleManualResume(p.ad_external_id)}
+                  disabled={resumingId === p.ad_external_id}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-success/30 bg-success/10 text-success hover:bg-success/20 disabled:opacity-50 transition-colors ml-3"
+                >
+                  {resumingId === p.ad_external_id ? (
+                    <><Loader2 size={12} className="animate-spin" /> Resuming...</>
+                  ) : (
+                    <><Play size={12} /> Resume</>
+                  )}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Rules */}
       {loading ? (
         Array(3).fill(0).map((_, i) => (
@@ -161,12 +245,13 @@ function AutomationContent() {
         <div className="text-center py-16">
           <Zap size={40} className="mx-auto mb-3 text-muted-foreground" />
           <h3 className="font-semibold text-foreground mb-2">No automation rules yet</h3>
-          <p className="text-sm text-muted-foreground mb-4">Create rules to automatically manage your campaigns</p>
-          <button onClick={() => setModalOpen(true)} className="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-lg"><Plus size={14} className="inline mr-1" /> Create First Rule</button>
+          <p className="text-sm text-muted-foreground mb-4">Create rules to automatically manage your ads across all accounts</p>
+          <button onClick={() => setModalOpen(true)} className="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-lg"><Plus size={14} className="inline mr-1" />Create First Rule</button>
         </div>
       ) : rules.map(rule => {
         const isLive = rule.scope === 'ad' || rule.scope === 'ad_set';
         const isKill = rule.action_type === 'kill_switch';
+        const targetCount = rule.target_external_ids?.length || 0;
 
         return (
           <div key={rule.id} className={`bg-card rounded-xl border shadow-card p-5 mb-3 card-hover ${isLive ? 'border-primary/30' : 'border-border'}`}>
@@ -187,6 +272,11 @@ function AutomationContent() {
                     <AlertTriangle size={10} /> KILL
                   </span>
                 )}
+                {targetCount > 0 && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-info/10 text-info border border-info/20">
+                    {targetCount} ads targeted
+                  </span>
+                )}
                 {rule.dry_run && <span className="text-xs text-warning font-medium">🧪 DRY RUN</span>}
               </div>
               <div className="flex items-center gap-1">
@@ -205,7 +295,8 @@ function AutomationContent() {
               {isLive && <span>Min spend: ${parseFloat(rule.min_spend_threshold || 1).toFixed(2)}</span>}
               <span>Last: {rule.last_triggered_at ? timeAgo(rule.last_triggered_at) : 'Never'}</span>
               <span>Triggers: {rule.trigger_count || 0}/{rule.max_triggers_per_day}</span>
-              {isLive && !isKill && <span className="text-success">↻ Auto-resume: every 60s</span>}
+              {isLive && !isKill && <span className="text-success">🔄 Auto pause & resume every 60s</span>}
+              {isLive && isKill && <span className="text-destructive">💀 Pause only — no auto-resume</span>}
             </div>
           </div>
         );
@@ -278,6 +369,11 @@ function AutomationContent() {
   );
 }
 
+
+// =============================================================
+// RULE CREATION / EDIT MODAL — with multi-ad picker
+// =============================================================
+
 function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
   const defaultName = prefilledCampaign ? `Rule for ${prefilledCampaign.name}` : '';
   const [name, setName] = useState(rule?.name || defaultName);
@@ -294,6 +390,25 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
   const [budgetAmount, setBudgetAmount] = useState(rule?.action_params?.amount || '');
   const [saving, setSaving] = useState(false);
 
+  // Multi-ad picker state
+  const [allAds, setAllAds] = useState([]);
+  const [adsLoading, setAdsLoading] = useState(false);
+  const [selectedExternalIds, setSelectedExternalIds] = useState(new Set(rule?.target_external_ids || []));
+  const [adPickerOpen, setAdPickerOpen] = useState(false);
+  const [adSearch, setAdSearch] = useState('');
+
+  // Fetch ads for picker on mount
+  useEffect(() => {
+    if (isLiveScope) {
+      setAdsLoading(true);
+      fetch('/api/automation/ads')
+        .then(r => r.json())
+        .then(data => setAllAds(data.ads || []))
+        .catch(() => {})
+        .finally(() => setAdsLoading(false));
+    }
+  }, [isLiveScope]);
+
   // Auto-switch action type when scope changes
   useEffect(() => {
     if (isLiveScope && !['auto_pause_resume', 'kill_switch'].includes(actionType)) {
@@ -308,6 +423,48 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
     const u = [...conditions];
     u[i] = { ...u[i], [field]: field === 'value' ? parseFloat(val) || '' : val };
     setConditions(u);
+  };
+
+  const toggleAdSelection = (externalId) => {
+    setSelectedExternalIds(prev => {
+      const next = new Set(prev);
+      if (next.has(externalId)) next.delete(externalId);
+      else next.add(externalId);
+      return next;
+    });
+  };
+
+  const selectAllAds = () => {
+    const filtered = getFilteredAds();
+    setSelectedExternalIds(prev => {
+      const next = new Set(prev);
+      for (const ad of filtered) next.add(ad.externalId);
+      return next;
+    });
+  };
+
+  const deselectAllAds = () => setSelectedExternalIds(new Set());
+
+  const getFilteredAds = () => {
+    if (!adSearch.trim()) return allAds;
+    const q = adSearch.toLowerCase();
+    return allAds.filter(ad =>
+      ad.name.toLowerCase().includes(q) ||
+      ad.campaignName?.toLowerCase().includes(q) ||
+      ad.accountName?.toLowerCase().includes(q)
+    );
+  };
+
+  // Group ads by account
+  const groupedAds = () => {
+    const filtered = getFilteredAds();
+    const groups = {};
+    for (const ad of filtered) {
+      const key = ad.accountName || 'Unknown Account';
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(ad);
+    }
+    return groups;
   };
 
   const handleSubmit = async () => {
@@ -327,6 +484,7 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
       max_triggers_per_day: maxTriggers,
       min_spend_threshold: parseFloat(minSpend) || 1,
       dry_run: dryRun,
+      target_external_ids: selectedExternalIds.size > 0 ? [...selectedExternalIds] : null,
     };
     if (rule?.id) body.id = rule.id;
 
@@ -362,6 +520,111 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
                 <option value="campaign">Campaign (DB metrics)</option>
               </select>
             </div>
+
+            {/* Multi-Ad Picker */}
+            {isLiveScope && (
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground uppercase mb-1.5">
+                  Target Ads
+                  <span className="text-[10px] font-normal ml-1 text-muted-foreground">
+                    ({selectedExternalIds.size > 0 ? `${selectedExternalIds.size} selected` : 'All ads — select specific ones below'})
+                  </span>
+                </label>
+
+                <button
+                  onClick={() => setAdPickerOpen(!adPickerOpen)}
+                  className={`w-full flex items-center justify-between px-3 py-2.5 text-sm border rounded-lg transition-colors ${
+                    selectedExternalIds.size > 0
+                      ? 'border-primary/40 bg-primary/5 text-foreground'
+                      : 'border-border bg-surface text-muted-foreground hover:bg-muted'
+                  }`}
+                >
+                  <span className="flex items-center gap-2">
+                    <CheckSquare size={14} />
+                    {selectedExternalIds.size > 0
+                      ? `${selectedExternalIds.size} ads selected across accounts`
+                      : 'All ads (click to select specific ads)'
+                    }
+                  </span>
+                  <ChevronDown size={14} className={`transition-transform ${adPickerOpen ? 'rotate-180' : ''}`} />
+                </button>
+
+                {adPickerOpen && (
+                  <div className="mt-2 border border-border rounded-lg bg-surface shadow-elevated max-h-[300px] flex flex-col overflow-hidden animate-fade-in">
+                    {/* Search + actions */}
+                    <div className="p-2 border-b border-border flex items-center gap-2">
+                      <div className="relative flex-1">
+                        <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                        <input
+                          value={adSearch} onChange={e => setAdSearch(e.target.value)}
+                          placeholder="Search ads, campaigns, accounts..."
+                          className="w-full pl-8 pr-3 py-1.5 text-xs border border-border rounded-md bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary/30"
+                          autoFocus
+                        />
+                      </div>
+                      <button onClick={selectAllAds} className="text-[10px] text-primary font-medium hover:underline whitespace-nowrap">Select All</button>
+                      <button onClick={deselectAllAds} className="text-[10px] text-muted-foreground hover:underline whitespace-nowrap">Clear</button>
+                    </div>
+
+                    {/* Ad list */}
+                    <div className="overflow-y-auto flex-1">
+                      {adsLoading ? (
+                        <div className="flex items-center justify-center py-8">
+                          <Loader2 size={16} className="animate-spin text-primary mr-2" />
+                          <span className="text-xs text-muted-foreground">Loading ads from Meta...</span>
+                        </div>
+                      ) : Object.entries(groupedAds()).length === 0 ? (
+                        <div className="text-xs text-muted-foreground text-center py-6">
+                          {adSearch ? 'No ads match your search' : 'No ads found'}
+                        </div>
+                      ) : (
+                        Object.entries(groupedAds()).map(([accountName, ads]) => (
+                          <div key={accountName}>
+                            <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-muted-foreground bg-muted/50 sticky top-0">
+                              {accountName}
+                              <span className="ml-1 font-normal text-muted-foreground/70">({ads.length} ads)</span>
+                            </div>
+                            {ads.map(ad => (
+                              <label
+                                key={ad.externalId}
+                                className={`flex items-center gap-2.5 px-3 py-2 text-sm hover:bg-muted/50 cursor-pointer transition-colors ${
+                                  selectedExternalIds.has(ad.externalId) ? 'bg-primary/5' : ''
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={selectedExternalIds.has(ad.externalId)}
+                                  onChange={() => toggleAdSelection(ad.externalId)}
+                                  className="w-3.5 h-3.5 rounded border-border accent-primary"
+                                />
+                                {ad.thumbnailUrl ? (
+                                  <img src={ad.thumbnailUrl} alt="" className="w-7 h-7 rounded object-cover border border-border flex-shrink-0" />
+                                ) : (
+                                  <div className="w-7 h-7 rounded bg-muted flex items-center justify-center flex-shrink-0">
+                                    <Image size={10} className="text-muted-foreground" />
+                                  </div>
+                                )}
+                                <div className="flex-1 min-w-0">
+                                  <div className="truncate text-xs font-medium">{ad.name}</div>
+                                  <div className="text-[10px] text-muted-foreground flex items-center gap-1">
+                                    <span>{ad.campaignName}</span>
+                                    <span className={`px-1 rounded text-[9px] ${
+                                      ad.status === 'ACTIVE' ? 'bg-success/10 text-success'
+                                      : ad.status === 'PAUSED' ? 'bg-warning/10 text-warning'
+                                      : 'bg-muted text-muted-foreground'
+                                    }`}>{ad.status}</span>
+                                  </div>
+                                </div>
+                              </label>
+                            ))}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             <div>
               <label className="block text-xs font-medium text-muted-foreground uppercase mb-1.5">Conditions (ALL must match)</label>
@@ -402,14 +665,14 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
             {isLiveScope && (
               <div className="rounded-lg px-4 py-3 bg-primary/5 border border-primary/20 text-xs text-foreground">
                 <p className="font-semibold text-primary mb-1">⚡ Live Monitor Rule</p>
-                <p className="text-muted-foreground">Checked every 60 seconds using LIVE Meta API data. Auto-resumes the MOMENT metrics recover — no waiting.</p>
+                <p className="text-muted-foreground">Checked every 60 seconds using LIVE Meta API data. Pauses ads when thresholds are breached. Auto-resumes the MOMENT metrics recover.</p>
               </div>
             )}
 
             <div>
               <label className="block text-xs font-medium text-muted-foreground uppercase mb-1.5">Action</label>
               <select value={actionType} onChange={e => setActionType(e.target.value)} className={inputCls}>
-                {isLiveScope && <option value="auto_pause_resume">🔄 Auto Pause + Resume (threshold)</option>}
+                {isLiveScope && <option value="auto_pause_resume">🔄 Auto Pause & Resume (threshold)</option>}
                 {isLiveScope && <option value="kill_switch">💀 Kill Switch (no auto-resume)</option>}
                 {!isLiveScope && <option value="pause_campaign">Pause campaign</option>}
                 {!isLiveScope && <option value="enable_campaign">Enable campaign</option>}
@@ -419,10 +682,10 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
                 <option value="send_alert">Send alert only</option>
               </select>
               {actionType === 'auto_pause_resume' && (
-                <p className="text-[10px] text-success mt-1">✅ Pauses when threshold breached → auto-resumes within 60s when metrics recover</p>
+                <p className="text-[10px] text-success mt-1">✅ Pauses when CPR/CPC breaches threshold → auto-resumes within 60s when metrics recover. Fully automated.</p>
               )}
               {actionType === 'kill_switch' && (
-                <p className="text-[10px] text-destructive mt-1">⚠️ Permanently pauses — will NEVER auto-resume. Manual re-enable required.</p>
+                <p className="text-[10px] text-destructive mt-1">⚠️ Permanently pauses — will NEVER auto-resume. Manual re-enable required from the paused ads section.</p>
               )}
             </div>
 
@@ -473,8 +736,11 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
 
             {isLiveScope && (
               <div className="rounded-lg px-4 py-3 bg-success/5 border border-success/20 text-xs text-foreground">
-                <p className="font-semibold text-success mb-1">↻ Resume Logic</p>
-                <p className="text-muted-foreground">Checked every 60 seconds. The MOMENT your metrics come back under threshold, the ad turns back on — no cooldown on resume.</p>
+                <p className="font-semibold text-success mb-1">🔄 How it works</p>
+                <p className="text-muted-foreground">
+                  Every 60 seconds: checks live metrics → if CPR/CPC exceeds threshold, ad gets <strong>paused</strong> →
+                  when metrics recover, ad gets <strong>auto-resumed</strong> immediately. You can also manually resume from the "Auto-Paused Ads" section above.
+                </p>
               </div>
             )}
 
