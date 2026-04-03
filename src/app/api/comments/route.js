@@ -2,7 +2,8 @@ import { NextResponse } from 'next/server';
 import { getSupabaseServer } from '@/lib/supabase-server';
 import { detectSpam } from '@/lib/spam-keywords';
 
-const META_GRAPH_URL = 'https://graph.facebook.com/v22.0';
+// Using v18.0 for comments — v19+ requires pages_read_user_content for the `from` field
+const META_GRAPH_URL = 'https://graph.facebook.com/v18.0';
 const FB_FIELDS = 'id,message,from{name,id},created_time,like_count,comment_count,is_hidden,attachment';
 const IG_FIELDS = 'id,text,timestamp,from{id,username},like_count,hidden,replies{id}';
 
