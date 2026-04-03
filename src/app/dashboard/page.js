@@ -33,9 +33,51 @@ export default function DashboardPage() {
   const { selectedAccountId, accountQueryParam } = useAccount();
   const { canPauseEnable, canCreateRules } = useAuth();
   const router = useRouter();
-  const [dateRange, setDateRange] = useState({ from: addDays(new Date(), -14), to: new Date() });
+  // Restore date range from localStorage on mount
+  const [dateRange, setDateRange] = useState(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem('dashboard_dateRange');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (parsed.presetLabel) {
+            const presetMap = {
+              'Today': () => ({ from: new Date(), to: new Date() }),
+              'Yesterday': () => ({ from: addDays(new Date(), -1), to: addDays(new Date(), -1) }),
+              '7D': () => ({ from: addDays(new Date(), -7), to: new Date() }),
+              '14D': () => ({ from: addDays(new Date(), -14), to: new Date() }),
+              '30D': () => ({ from: addDays(new Date(), -30), to: new Date() }),
+            };
+            if (presetMap[parsed.presetLabel]) return presetMap[parsed.presetLabel]();
+          }
+          if (parsed.from && parsed.to) return { from: new Date(parsed.from), to: new Date(parsed.to) };
+        }
+      } catch {}
+    }
+    return { from: addDays(new Date(), -14), to: new Date() };
+  });
+  const [activePresetLabel, setActivePresetLabel] = useState(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem('dashboard_dateRange');
+        if (saved) return JSON.parse(saved).presetLabel || null;
+      } catch {}
+    }
+    return null;
+  });
   const [breakdown, setBreakdown] = useState('day');
   const [chartMetric, setChartMetric] = useState('spend');
+
+  // Persist date range to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem('dashboard_dateRange', JSON.stringify({
+        from: dateRange.from.toISOString(),
+        to: dateRange.to.toISOString(),
+        presetLabel: activePresetLabel,
+      }));
+    } catch {}
+  }, [dateRange, activePresetLabel]);
 
   const [kpis, setKpis] = useState(null);
   const [chart, setChart] = useState([]);
@@ -273,9 +315,9 @@ export default function DashboardPage() {
         <div className="flex items-center bg-muted rounded-lg p-0.5">
           {presets.map(p => {
             const r = p.get();
-            const active = isSameDay(dateRange.from, r.from) && isSameDay(dateRange.to, r.to);
+            const active = activePresetLabel === p.label || (!activePresetLabel && isSameDay(dateRange.from, r.from) && isSameDay(dateRange.to, r.to));
             return (
-              <button key={p.label} onClick={() => setDateRange(p.get())}
+              <button key={p.label} onClick={() => { setDateRange(p.get()); setActivePresetLabel(p.label); }}
                 className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${active ? 'bg-surface text-foreground shadow-card' : 'text-muted-foreground hover:text-foreground'}`}
               >{p.label}</button>
             );
@@ -284,10 +326,10 @@ export default function DashboardPage() {
 
         {/* Custom date range */}
         <div className="flex items-center gap-1.5">
-          <input type="date" value={dateFrom} onChange={e => setDateRange(r => ({ ...r, from: new Date(e.target.value) }))}
+          <input type="date" value={dateFrom} onChange={e => { setDateRange(r => ({ ...r, from: new Date(e.target.value) })); setActivePresetLabel(null); }}
             className="px-2 py-1.5 text-xs border border-border rounded-md bg-surface text-foreground" />
           <span className="text-[10px] text-muted-foreground">to</span>
-          <input type="date" value={dateTo} onChange={e => setDateRange(r => ({ ...r, to: new Date(e.target.value) }))}
+          <input type="date" value={dateTo} onChange={e => { setDateRange(r => ({ ...r, to: new Date(e.target.value) })); setActivePresetLabel(null); }}
             className="px-2 py-1.5 text-xs border border-border rounded-md bg-surface text-foreground" />
         </div>
 

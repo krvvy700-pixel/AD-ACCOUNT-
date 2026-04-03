@@ -134,6 +134,13 @@ export async function middleware(request) {
       }
     }
 
+    // Comments write operations (block/delete/bulk) — viewer cannot access
+    if ((pathname === '/api/comments' || pathname.startsWith('/api/comments/')) && request.method !== 'GET') {
+      if (role === 'viewer') {
+        return NextResponse.json({ error: 'View-only access — action not permitted' }, { status: 403 });
+      }
+    }
+
     // Pass role info to downstream via headers (for API routes to use)
     const response = NextResponse.next();
     response.headers.set('x-user-role', role);

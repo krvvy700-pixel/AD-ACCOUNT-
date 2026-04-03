@@ -79,32 +79,53 @@ export async function GET(request) {
     }
 
     // Build enriched rows
-    // NOTE: Per-campaign reach from summed daily rows is an APPROXIMATION.
-    // True deduplicated reach requires per-campaign API calls which is too
-    // expensive for the table view. We mark it with reachEstimated flag.
+    // PAUSED CAMPAIGN FIX: Validate data consistency before computing derived metrics.
+    // Stale/corrupt sync data can cause impossible values (e.g. 39 clicks with $0.08 spend).
     const enriched = campaigns.map(c => {
-      const curr = currMap[c.id] || { spend: 0, impressions: 0, clicks: 0, conversions: 0, conversionValue: 0, reach: 0 };
+      let curr = currMap[c.id] || { spend: 0, impressions: 0, clicks: 0, conversions: 0, conversionValue: 0, reach: 0 };
       const prev = prevMap[c.id] || { spend: 0, impressions: 0, clicks: 0, conversions: 0, conversionValue: 0 };
+
+      // --- DATA SANITY CHECKS ---
+      // 1. Paused + zero spend = zero all activity (stale sync data)
+      if (c.status === 'PAUSED' && curr.spend < 0.01) {
+        curr = { spend: 0, impressions: 0, clicks: 0, conversions: 0, conversionValue: 0, reach: 0 };
+      }
+
+      // 2. CPC sanity: if clicks exist but CPC is impossibly low (<$0.005), reset clicks
+      if (curr.clicks > 0 && curr.spend > 0) {
+        const computedCpc = curr.spend / curr.clicks;
+        if (computedCpc < 0.005 && curr.clicks > 5) {
+          console.warn(`[Campaigns] Data anomaly for "${c.name}": ${curr.clicks} clicks with $${curr.spend.toFixed(2)} spend. Resetting.`);
+          curr.clicks = 0;
+          curr.impressions = 0;
+        }
+      }
+
+      const spend = curr.spend;
+      const clicks = curr.clicks;
+      const impressions = curr.impressions;
+      const conversions = curr.conversions;
+      const conversionValue = curr.conversionValue;
 
       return {
         id: c.id, externalId: c.external_id, name: c.name, status: c.status, objective: c.objective,
         dailyBudget: c.daily_budget, lifetimeBudget: c.lifetime_budget,
         accountName: c.meta_accounts?.name || 'Unknown',
-        spend: curr.spend, impressions: curr.impressions, clicks: curr.clicks,
-        conversions: curr.conversions, conversionValue: curr.conversionValue,
+        spend, impressions, clicks,
+        conversions, conversionValue,
         reach: curr.reach,
-        reachEstimated: true, // summed daily reach — NOT deduplicated
-        cpc: curr.clicks > 0 ? +(curr.spend / curr.clicks).toFixed(4) : 0,
-        ctr: curr.impressions > 0 ? +((curr.clicks / curr.impressions) * 100).toFixed(4) : 0,
-        roas: curr.spend > 0 ? +(curr.conversionValue / curr.spend).toFixed(4) : 0,
-        cpa: curr.conversions > 0 ? +(curr.spend / curr.conversions).toFixed(2) : 0,
+        reachEstimated: true,
+        cpc: clicks > 0 && spend > 0 ? +(spend / clicks).toFixed(4) : 0,
+        ctr: impressions > 0 ? +((clicks / impressions) * 100).toFixed(4) : 0,
+        roas: spend > 0 ? +(conversionValue / spend).toFixed(4) : 0,
+        cpa: conversions > 0 && spend > 0 ? +(spend / conversions).toFixed(2) : 0,
         changes: {
-          spend: pctChange(curr.spend, prev.spend),
-          clicks: pctChange(curr.clicks, prev.clicks),
-          conversions: pctChange(curr.conversions, prev.conversions),
-          roas: pctChange(curr.spend > 0 ? curr.conversionValue / curr.spend : 0, prev.spend > 0 ? prev.conversionValue / prev.spend : 0),
+          spend: pctChange(spend, prev.spend),
+          clicks: pctChange(clicks, prev.clicks),
+          conversions: pctChange(conversions, prev.conversions),
+          roas: pctChange(spend > 0 ? conversionValue / spend : 0, prev.spend > 0 ? prev.conversionValue / prev.spend : 0),
         },
-        performanceTier: getPerformanceTier(curr),
+        performanceTier: getPerformanceTier({ spend, clicks, conversions, conversionValue, impressions }),
       };
     });
 

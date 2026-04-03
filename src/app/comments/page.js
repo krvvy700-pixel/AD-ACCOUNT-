@@ -6,6 +6,7 @@ import { useAuth } from '@/context/AuthContext';
 import {
   MessageCircle, Loader2, Send, Eye, EyeOff, Trash2, RefreshCw,
   X, Power, PowerOff, Search, ChevronDown, Image, Film,
+  Ban, AlertTriangle, CheckSquare, Shield,
 } from 'lucide-react';
 
 const FbIcon = ({ size = 12 }) => <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>;
@@ -37,6 +38,15 @@ export default function CommentsPage() {
   // Action loading
   const [actionLoading, setActionLoading] = useState({});
 
+  // Spam & Block state
+  const [activeTab, setActiveTab] = useState('all'); // 'all' | 'spam' | 'blocked'
+  const [totalSpam, setTotalSpam] = useState(0);
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [bulkLoading, setBulkLoading] = useState(false);
+  const [blocked, setBlocked] = useState([]);
+  const [blockModal, setBlockModal] = useState(null);
+  const [blockReason, setBlockReason] = useState('Spam/Fake comment');
+
   const fetchComments = useCallback(async () => {
     if (!fetchEnabled) return;
     setLoading(true);
@@ -52,6 +62,7 @@ export default function CommentsPage() {
       const data = await res.json();
       setComments(data.comments || []);
       setTotal(data.total || 0);
+      setTotalSpam(data.totalSpam || 0);
       // Only update ads list on first load or when account changes (not on ad filter change)
       if (data.ads?.length) setAds(data.ads);
     } catch (err) {
@@ -100,13 +111,88 @@ export default function CommentsPage() {
   // Filter comments client-side by search
   const filtered = useMemo(() => {
     return comments.filter(c => {
+      if (activeTab === 'spam' && !c.isSpam) return false;
       if (platformFilter !== 'all' && c.platform !== platformFilter) return false;
       if (!searchQuery) return true;
       return c.message?.toLowerCase().includes(searchQuery.toLowerCase())
         || c.authorName?.toLowerCase().includes(searchQuery.toLowerCase())
         || c.adName?.toLowerCase().includes(searchQuery.toLowerCase());
     });
-  }, [comments, platformFilter, searchQuery]);
+  }, [comments, platformFilter, searchQuery, activeTab]);
+
+  // Fetch blocked accounts
+  const fetchBlocked = useCallback(async () => {
+    try {
+      const res = await fetch('/api/comments/blocked');
+      if (res.ok) { const data = await res.json(); setBlocked(data.blocked || []); }
+    } catch {}
+  }, []);
+
+  useEffect(() => { if (activeTab === 'blocked') fetchBlocked(); }, [activeTab, fetchBlocked]);
+
+  // Block action
+  const handleBlock = async (comment) => {
+    setActionLoading(l => ({ ...l, [`block_${comment.id}`]: true }));
+    try {
+      const res = await fetch('/api/comments', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'block', userId: comment.authorId,
+          postId: comment.postId, platform: comment.platform,
+          userName: comment.authorName, reason: blockReason,
+        }),
+      });
+      if (res.ok) { setBlockModal(null); fetchBlocked(); }
+      else { const err = await res.json(); alert(err.error || 'Block failed'); }
+    } catch {}
+    setActionLoading(l => ({ ...l, [`block_${comment.id}`]: false }));
+  };
+
+  // Unblock
+  const handleUnblock = async (b) => {
+    setActionLoading(l => ({ ...l, [`unblock_${b.user_id}`]: true }));
+    try {
+      const res = await fetch('/api/comments', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'unblock', userId: b.user_id, pageId: b.page_id }),
+      });
+      if (res.ok) setBlocked(prev => prev.filter(x => x.user_id !== b.user_id));
+    } catch {}
+    setActionLoading(l => ({ ...l, [`unblock_${b.user_id}`]: false }));
+  };
+
+  // Bulk delete
+  const handleBulkDelete = async () => {
+    if (!selectedIds.size) return;
+    setBulkLoading(true);
+    try {
+      const res = await fetch('/api/comments', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'bulk_delete', commentIds: [...selectedIds] }),
+      });
+      if (res.ok) { setComments(prev => prev.filter(c => !selectedIds.has(c.id))); setSelectedIds(new Set()); }
+    } catch {}
+    setBulkLoading(false);
+  };
+
+  // Delete all spam
+  const handleDeleteAllSpam = async () => {
+    if (!confirm('Delete ALL detected spam comments? This cannot be undone.')) return;
+    setBulkLoading(true);
+    const spamIds = comments.filter(c => c.isSpam).map(c => c.id);
+    try {
+      const res = await fetch('/api/comments', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'bulk_delete', commentIds: spamIds }),
+      });
+      if (res.ok) { setComments(prev => prev.filter(c => !c.isSpam)); setSelectedIds(new Set()); }
+    } catch {}
+    setBulkLoading(false);
+  };
+
+  const toggleSelect = (id) => setSelectedIds(prev => {
+    const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next;
+  });
 
   // Selected ad name for display
   const selectedAdName = selectedAdId !== 'all'
@@ -162,6 +248,47 @@ export default function CommentsPage() {
 
   return (
     <AppShell title="Comments">
+      {/* Tabs: All | Spam & Fake | Blocked */}
+      <div className="flex items-center gap-1 bg-muted rounded-lg p-0.5 mb-4 w-fit">
+        {[{ key: 'all', label: 'All Comments', icon: MessageCircle, count: total },
+          { key: 'spam', label: 'Spam & Fake', icon: AlertTriangle, count: totalSpam },
+          { key: 'blocked', label: 'Blocked', icon: Ban, count: blocked.length }].map(tab => (
+          <button key={tab.key} onClick={() => { setActiveTab(tab.key); setSelectedIds(new Set()); }}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
+              activeTab === tab.key ? 'bg-surface text-foreground shadow-card' : 'text-muted-foreground hover:text-foreground'
+            }`}>
+            <tab.icon size={12} />
+            {tab.label}
+            {tab.count > 0 && <span className={`ml-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
+              tab.key === 'spam' && activeTab !== 'spam' ? 'bg-destructive text-white' : 'bg-muted-foreground/20 text-muted-foreground'
+            }`}>{tab.count}</span>}
+          </button>
+        ))}
+      </div>
+
+      {/* Blocked Accounts Tab */}
+      {activeTab === 'blocked' ? (
+        <div className="bg-card rounded-xl border border-border shadow-card">
+          <div className="px-5 py-4 border-b border-border">
+            <h3 className="text-sm font-semibold text-foreground flex items-center gap-2"><Ban size={14} /> Blocked Accounts</h3>
+          </div>
+          {blocked.length === 0 ? (
+            <div className="text-center py-12"><Ban size={32} className="mx-auto text-muted-foreground/40 mb-3" /><p className="text-sm text-muted-foreground">No blocked accounts</p></div>
+          ) : (
+            <div className="divide-y divide-border">
+              {blocked.map(b => (
+                <div key={b.id || b.user_id} className="flex items-center justify-between px-5 py-3 hover:bg-muted/30">
+                  <div><div className="text-sm font-medium">{b.user_name}</div><div className="text-xs text-muted-foreground">{b.reason} · {timeAgo(b.blocked_at)}</div></div>
+                  <button onClick={() => handleUnblock(b)} disabled={actionLoading[`unblock_${b.user_id}`]
+                  } className="flex items-center gap-1 px-3 py-1.5 text-xs border border-border rounded-md hover:bg-muted disabled:opacity-50">
+                    {actionLoading[`unblock_${b.user_id}`] ? <Loader2 size={12} className="animate-spin" /> : <Shield size={12} />} Unblock
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (<>
       {/* Fetch Toggle */}
       <div className={`flex items-center justify-between mb-6 px-5 py-4 rounded-xl border transition-all duration-300 ${
         fetchEnabled ? 'bg-success/5 border-success/30' : 'bg-card border-border shadow-card'
@@ -223,6 +350,15 @@ export default function CommentsPage() {
               <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
               Refresh
             </button>
+
+            {/* Spam tab: Delete All */}
+            {activeTab === 'spam' && totalSpam > 0 && (
+              <button onClick={handleDeleteAllSpam} disabled={bulkLoading}
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg bg-destructive text-white hover:bg-destructive/90 disabled:opacity-50">
+                {bulkLoading ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                Delete All Spam
+              </button>
+            )}
           </div>
 
           {/* Row 2: Ad/Post filter dropdown */}
@@ -357,6 +493,20 @@ export default function CommentsPage() {
         </div>
       )}
 
+      {/* Bulk Actions Bar */}
+      {selectedIds.size > 0 && (
+        <div className="flex items-center gap-3 px-4 py-2.5 bg-primary/5 rounded-lg border border-primary/20 mb-4 animate-fade-in">
+          <span className="text-sm font-semibold text-primary"><CheckSquare size={14} className="inline mr-1" />{selectedIds.size} selected</span>
+          <div className="w-px h-5 bg-border" />
+          <button onClick={handleBulkDelete} disabled={bulkLoading}
+            className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-destructive/10 text-destructive hover:bg-destructive/20 disabled:opacity-50">
+            {bulkLoading ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} Delete Selected
+          </button>
+          <div className="flex-1" />
+          <button onClick={() => setSelectedIds(new Set())} className="text-xs text-muted-foreground hover:text-foreground">Clear</button>
+        </div>
+      )}
+
       {/* Content */}
       {!fetchEnabled ? (
         <div className="bg-card rounded-xl border border-border shadow-card p-16 text-center">
@@ -418,11 +568,15 @@ export default function CommentsPage() {
           {filtered.map(comment => (
             <div key={comment.id}
               className={`bg-card rounded-xl border shadow-card p-4 transition-all ${
-                comment.isHidden ? 'border-warning/30 opacity-60' : 'border-border'
+                comment.isHidden ? 'border-warning/30 opacity-60' : comment.isSpam ? 'border-destructive/30' : 'border-border'
               }`}>
               {/* Header */}
               <div className="flex items-start justify-between mb-2">
                 <div className="flex items-center gap-3">
+                  {/* Checkbox for bulk select */}
+                  <input type="checkbox" checked={selectedIds.has(comment.id)}
+                    onChange={() => toggleSelect(comment.id)}
+                    className="w-3.5 h-3.5 rounded border-border accent-primary cursor-pointer mt-1" />
                   {/* Ad thumbnail */}
                   {comment.thumbnailUrl && (
                     <img src={comment.thumbnailUrl} alt="" className="w-10 h-10 rounded-lg object-cover border border-border" />
@@ -438,6 +592,11 @@ export default function CommentsPage() {
                       </span>
                       {comment.isHidden && (
                         <span className="text-[10px] text-warning font-medium">🙈 Hidden</span>
+                      )}
+                      {comment.isSpam && (
+                        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-destructive/10 text-destructive">
+                          <AlertTriangle size={8} /> SPAM
+                        </span>
                       )}
                     </div>
                     <p className="text-[10px] text-muted-foreground">
@@ -470,29 +629,46 @@ export default function CommentsPage() {
                         ? <Loader2 size={12} className="animate-spin" />
                         : <Trash2 size={12} />}
                     </button>
+                    {/* Block Account — only if we have the user ID */}
+                    {comment.authorId && (
+                    <button onClick={() => { setBlockModal(comment); setBlockReason('Spam/Fake comment'); }}
+                      className="p-1.5 rounded-md bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors" title="Block Account">
+                      <Ban size={12} />
+                    </button>
+                    )}
                   </div>
                 )}
               </div>
 
               {/* Comment message */}
-              <p className="text-sm text-foreground ml-[52px] mb-2">{comment.message}</p>
+              <p className="text-sm text-foreground ml-[78px] mb-2">{comment.message}</p>
+
+              {/* Spam Keywords */}
+              {comment.matchedKeywords?.length > 0 && (
+                <div className="flex flex-wrap gap-1 ml-[78px] mb-2">
+                  {comment.matchedKeywords.slice(0, 5).map(kw => (
+                    <span key={kw} className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-warning/10 text-warning">{kw}</span>
+                  ))}
+                  {comment.matchedKeywords.length > 5 && <span className="text-[10px] text-muted-foreground">+{comment.matchedKeywords.length - 5} more</span>}
+                </div>
+              )}
 
               {/* Attachment */}
               {comment.hasAttachment && comment.attachmentUrl && (
-                <div className="ml-[52px] mb-2">
+                <div className="ml-[78px] mb-2">
                   <img src={comment.attachmentUrl} alt="Attachment" className="max-w-[200px] rounded-lg border border-border" />
                 </div>
               )}
 
               {/* Stats */}
-              <div className="flex items-center gap-4 ml-[52px] text-[10px] text-muted-foreground">
+              <div className="flex items-center gap-4 ml-[78px] text-[10px] text-muted-foreground">
                 {comment.likeCount > 0 && <span>❤️ {comment.likeCount}</span>}
                 {comment.replyCount > 0 && <span>💬 {comment.replyCount} replies</span>}
               </div>
 
               {/* Reply input */}
               {replyingTo === comment.id && (
-                <div className="flex items-center gap-2 ml-[52px] mt-3">
+                <div className="flex items-center gap-2 ml-[78px] mt-3">
                   <input value={replyText} onChange={e => setReplyText(e.target.value)}
                     placeholder="Write a reply..."
                     onKeyDown={e => e.key === 'Enter' && handleReply(comment.id, comment.postId, comment.platform)}
@@ -510,6 +686,50 @@ export default function CommentsPage() {
             </div>
           ))}
         </div>
+      )}
+      </>)}
+
+      {/* Block Account Modal */}
+      {blockModal && (
+        <>
+          <div className="fixed inset-0 z-40 bg-foreground/20" onClick={() => setBlockModal(null)} />
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="bg-surface rounded-xl shadow-elevated border border-border w-full max-w-md animate-fade-in">
+              <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+                <h2 className="font-semibold flex items-center gap-2"><Ban size={16} className="text-destructive" /> Block Account</h2>
+                <button onClick={() => setBlockModal(null)} className="p-1 rounded hover:bg-muted"><X size={18} /></button>
+              </div>
+              <div className="p-6 space-y-4">
+                <div className="bg-destructive/5 border border-destructive/20 rounded-lg p-4">
+                  <p className="text-sm mb-1">Block <strong>{blockModal.authorName}</strong>?</p>
+                  <p className="text-xs text-muted-foreground">This will hide all their comments and prevent them from commenting on your page.</p>
+                </div>
+                <div className="bg-muted rounded-lg p-3">
+                  <p className="text-xs text-muted-foreground mb-1">Their comment:</p>
+                  <p className="text-sm">{blockModal.message}</p>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted-foreground uppercase mb-1.5">Reason</label>
+                  <select value={blockReason} onChange={e => setBlockReason(e.target.value)}
+                    className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-surface focus:outline-none focus:ring-2 focus:ring-primary/20">
+                    <option>Spam/Fake comment</option>
+                    <option>Abusive language</option>
+                    <option>Defamation</option>
+                    <option>Competitor</option>
+                    <option>Repeated offender</option>
+                  </select>
+                </div>
+              </div>
+              <div className="flex justify-end gap-2 px-6 py-4 border-t border-border">
+                <button onClick={() => setBlockModal(null)} className="px-4 py-2 text-sm font-medium border border-border rounded-lg hover:bg-muted">Cancel</button>
+                <button onClick={() => handleBlock(blockModal)} disabled={!!actionLoading[`block_${blockModal.id}`]}
+                  className="px-4 py-2 text-sm font-medium bg-destructive text-white rounded-lg hover:bg-destructive/90 disabled:opacity-50 flex items-center gap-2">
+                  {actionLoading[`block_${blockModal.id}`] ? <><Loader2 size={14} className="animate-spin" /> Blocking...</> : <><Ban size={14} /> Block User</>}
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
       )}
     </AppShell>
   );

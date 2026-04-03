@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSupabaseServer } from '@/lib/supabase-server';
+import { detectSpam } from '@/lib/spam-keywords';
 
 const META_GRAPH_URL = 'https://graph.facebook.com/v22.0';
 const FB_FIELDS = 'id,message,from{name,id},created_time,like_count,comment_count,is_hidden,attachment';
@@ -148,6 +149,7 @@ export async function GET(request) {
               thumbnailUrl: ad.thumb, postId,
               accountName: ad.accountName, accountId: ad.accountId,
               platform: isIG ? 'instagram' : 'facebook',
+              ...detectSpam(isIG ? (c.text || '') : (c.message || '')),
             });
           }
         }
@@ -160,22 +162,97 @@ export async function GET(request) {
     const seen = new Set(), uniqueAds = [];
     for (const ad of allAds) { if (!seen.has(ad.id)) { seen.add(ad.id); uniqueAds.push(ad); } }
 
-    return NextResponse.json({ comments: allComments.slice(0, limit), ads: uniqueAds, total: allComments.length });
+    return NextResponse.json({
+      comments: allComments.slice(0, limit),
+      ads: uniqueAds,
+      total: allComments.length,
+      totalSpam: allComments.filter(c => c.isSpam).length,
+    });
   } catch (e) {
     console.error('Comments API error:', e);
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }
 
-// POST /api/comments — Reply, hide/unhide, delete
+// POST /api/comments — Reply, hide/unhide, delete, block, bulk_delete
 export async function POST(request) {
-  const { commentId, action, message, postId, platform } = await request.json();
-  if (!commentId || !action) return NextResponse.json({ error: 'commentId and action required' }, { status: 400 });
+  const body = await request.json();
+  const { commentId, action, message, postId, platform, commentIds, userId, pageId, userName, reason } = body;
+  if (!action) return NextResponse.json({ error: 'action required' }, { status: 400 });
 
   const isIG = platform === 'instagram';
   const supabase = getSupabaseServer();
   const { data: accounts } = await supabase.from('meta_accounts').select('access_token').eq('is_active', true);
   if (!accounts?.length) return NextResponse.json({ error: 'No active account' }, { status: 400 });
+
+  // --- Bulk delete ---
+  if (action === 'bulk_delete') {
+    if (!commentIds?.length) return NextResponse.json({ error: 'No comment IDs' }, { status: 400 });
+    let deleted = 0, failed = 0;
+    for (const account of accounts) {
+      try {
+        const { pages } = await getPageTokens(account.access_token);
+        for (const cId of commentIds) {
+          try {
+            const commentPageId = cId.split('_')[0];
+            const token = pages[commentPageId]?.token || Object.values(pages)[0]?.token || account.access_token;
+            const res = await fetch(`${META_GRAPH_URL}/${cId}?access_token=${token}`, { method: 'DELETE' });
+            if (res.ok) deleted++; else failed++;
+          } catch { failed++; }
+        }
+        if (deleted > 0) break;
+      } catch { continue; }
+    }
+    return NextResponse.json({ success: true, action: 'bulk_deleted', deleted, failed });
+  }
+
+  // --- Block user ---
+  if (action === 'block') {
+    if (!userId) return NextResponse.json({ error: 'userId required' }, { status: 400 });
+    for (const account of accounts) {
+      try {
+        const { pages } = await getPageTokens(account.access_token);
+        const targetPageId = pageId || (postId ? postId.split('_')[0] : Object.keys(pages)[0]);
+        const pageToken = pages[targetPageId]?.token || Object.values(pages)[0]?.token || account.access_token;
+
+        const res = await fetch(`${META_GRAPH_URL}/${targetPageId}/blocked`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user: userId, access_token: pageToken }),
+        });
+        if (res.ok) {
+          await supabase.from('blocked_accounts').upsert({
+            page_id: targetPageId, user_id: userId,
+            user_name: userName || 'Unknown',
+            reason: reason || 'Spam/Fake comment',
+            blocked_at: new Date().toISOString(),
+          }, { onConflict: 'page_id,user_id' });
+          return NextResponse.json({ success: true, action: 'blocked', userId });
+        }
+      } catch { continue; }
+    }
+    return NextResponse.json({ error: 'Block failed' }, { status: 500 });
+  }
+
+  // --- Unblock user ---
+  if (action === 'unblock') {
+    if (!userId || !pageId) return NextResponse.json({ error: 'userId and pageId required' }, { status: 400 });
+    for (const account of accounts) {
+      try {
+        const { pages } = await getPageTokens(account.access_token);
+        const pageToken = pages[pageId]?.token || Object.values(pages)[0]?.token || account.access_token;
+        const res = await fetch(`${META_GRAPH_URL}/${pageId}/blocked?user=${userId}&access_token=${pageToken}`, { method: 'DELETE' });
+        if (res.ok) {
+          await supabase.from('blocked_accounts').delete().eq('page_id', pageId).eq('user_id', userId);
+          return NextResponse.json({ success: true, action: 'unblocked', userId });
+        }
+      } catch { continue; }
+    }
+    return NextResponse.json({ error: 'Unblock failed' }, { status: 500 });
+  }
+
+  // --- Single comment actions (reply, hide, unhide, delete) ---
+  if (!commentId) return NextResponse.json({ error: 'commentId required' }, { status: 400 });
 
   let lastError = null;
   for (const account of accounts) {
@@ -185,8 +262,8 @@ export async function POST(request) {
       if (isIG) {
         token = getIgToken(null, pages, igMap, account.access_token);
       } else {
-        const pageId = (postId || commentId).split('_')[0];
-        token = pages[pageId]?.token || Object.values(pages)[0]?.token || account.access_token;
+        const commentPageId = (postId || commentId).split('_')[0];
+        token = pages[commentPageId]?.token || Object.values(pages)[0]?.token || account.access_token;
       }
 
       let res;
@@ -197,10 +274,10 @@ export async function POST(request) {
           body: JSON.stringify({ message, access_token: token }),
         });
       } else if (action === 'hide' || action === 'unhide') {
-        const body = isIG ? { hide: action === 'hide' } : { is_hidden: action === 'hide' };
+        const hidePayload = isIG ? { hide: action === 'hide' } : { is_hidden: action === 'hide' };
         res = await fetch(`${META_GRAPH_URL}/${commentId}`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...body, access_token: token }),
+          body: JSON.stringify({ ...hidePayload, access_token: token }),
         });
       } else if (action === 'delete') {
         res = await fetch(`${META_GRAPH_URL}/${commentId}?access_token=${token}`, { method: 'DELETE' });
