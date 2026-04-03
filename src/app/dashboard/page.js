@@ -33,43 +33,42 @@ export default function DashboardPage() {
   const { selectedAccountId, accountQueryParam } = useAccount();
   const { canPauseEnable, canCreateRules } = useAuth();
   const router = useRouter();
-  // Restore date range from localStorage on mount
-  const [dateRange, setDateRange] = useState(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const saved = localStorage.getItem('dashboard_dateRange');
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          if (parsed.presetLabel) {
-            const presetMap = {
-              'Today': () => ({ from: new Date(), to: new Date() }),
-              'Yesterday': () => ({ from: addDays(new Date(), -1), to: addDays(new Date(), -1) }),
-              '7D': () => ({ from: addDays(new Date(), -7), to: new Date() }),
-              '14D': () => ({ from: addDays(new Date(), -14), to: new Date() }),
-              '30D': () => ({ from: addDays(new Date(), -30), to: new Date() }),
-            };
-            if (presetMap[parsed.presetLabel]) return presetMap[parsed.presetLabel]();
-          }
-          if (parsed.from && parsed.to) return { from: new Date(parsed.from), to: new Date(parsed.to) };
-        }
-      } catch {}
-    }
-    return { from: addDays(new Date(), -14), to: new Date() };
-  });
-  const [activePresetLabel, setActivePresetLabel] = useState(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const saved = localStorage.getItem('dashboard_dateRange');
-        if (saved) return JSON.parse(saved).presetLabel || null;
-      } catch {}
-    }
-    return null;
-  });
-  const [breakdown, setBreakdown] = useState('day');
-  const [chartMetric, setChartMetric] = useState('spend');
+  const [dateRange, setDateRange] = useState({ from: addDays(new Date(), -14), to: new Date() });
+  const [activePresetLabel, setActivePresetLabel] = useState(null);
+  const isDateRestoredRef = useRef(false);
 
-  // Persist date range to localStorage
+  // Restore date range from localStorage AFTER hydration (client-only)
   useEffect(() => {
+    if (isDateRestoredRef.current) return;
+    isDateRestoredRef.current = true;
+    try {
+      const saved = localStorage.getItem('dashboard_dateRange');
+      if (!saved) return;
+      const parsed = JSON.parse(saved);
+      if (parsed.presetLabel) {
+        const presetMap = {
+          'Today': () => ({ from: new Date(), to: new Date() }),
+          'Yesterday': () => ({ from: addDays(new Date(), -1), to: addDays(new Date(), -1) }),
+          '7D': () => ({ from: addDays(new Date(), -7), to: new Date() }),
+          '14D': () => ({ from: addDays(new Date(), -14), to: new Date() }),
+          '30D': () => ({ from: addDays(new Date(), -30), to: new Date() }),
+        };
+        if (presetMap[parsed.presetLabel]) {
+          setDateRange(presetMap[parsed.presetLabel]());
+          setActivePresetLabel(parsed.presetLabel);
+          return;
+        }
+      }
+      if (parsed.from && parsed.to) {
+        setDateRange({ from: new Date(parsed.from), to: new Date(parsed.to) });
+      }
+    } catch {}
+  }, []);
+
+  // Persist date range to localStorage (skip initial mount)
+  const hasMountedRef = useRef(false);
+  useEffect(() => {
+    if (!hasMountedRef.current) { hasMountedRef.current = true; return; }
     try {
       localStorage.setItem('dashboard_dateRange', JSON.stringify({
         from: dateRange.from.toISOString(),
@@ -78,6 +77,9 @@ export default function DashboardPage() {
       }));
     } catch {}
   }, [dateRange, activePresetLabel]);
+
+  const [breakdown, setBreakdown] = useState('day');
+  const [chartMetric, setChartMetric] = useState('spend');
 
   const [kpis, setKpis] = useState(null);
   const [chart, setChart] = useState([]);
