@@ -1,14 +1,15 @@
 // =============================================================
-// LIVE AD MONITOR v2 — BULLETPROOF RULES ENGINE
+// LIVE AD MONITOR v2 — ZERO COOLDOWN RULES ENGINE
 //
 // Runs every 60s via cron. Fetches LIVE data from Meta API.
 // Evaluates rules. Pauses ads that breach thresholds.
 // Resumes ads THE VERY NEXT CHECK (60s) when metrics recover.
 //
-// GUARANTEES:
-//  ✓ Cooldown on PAUSE only (not resume) — configured per rule
-//  ✓ Resume checks every 60s — no waiting, instant recovery
-//  ✓ Min spend guard — won't fire on $0.10 spend with 0 clicks
+// ZERO COOLDOWN POLICY:
+//  ✓ NO cooldown — if metrics breach, ad is PAUSED instantly
+//  ✓ NO cooldown — if metrics recover on next check, ad is RESUMED instantly
+//  ✓ Every 60s check acts independently — no waiting period
+//  ✓ Min spend guard — won't fire on low spend
 //  ✓ NaN/Infinity guards — CPC=0 when no clicks, not Infinity
 //  ✓ Retry with backoff — 3 attempts on Meta API failures
 //  ✓ Full pagination — handles >500 ads
@@ -139,7 +140,7 @@ export async function evaluateLiveRules() {
   const elapsed = Date.now() - startTime;
   const totalPaused = results.reduce((s, r) => s + (r.paused || 0), 0);
   const totalResumed = results.reduce((s, r) => s + (r.resumed || 0), 0);
-  const totalSkipped = results.reduce((s, r) => s + (r.skippedCooldown || 0) + (r.skippedMinSpend || 0), 0);
+  const totalSkipped = results.reduce((s, r) => s + (r.skippedMinSpend || 0), 0);
 
   console.log(
     `[LiveMonitor] Done in ${elapsed}ms — ` +
@@ -160,22 +161,22 @@ export async function evaluateLiveRules() {
 
 
 // =============================================================
-// RULE EVALUATION — The core logic
+// RULE EVALUATION — The core logic (ZERO COOLDOWN)
 // =============================================================
 
 /**
  * Evaluate a single rule against all live entity data.
- * Handles: pause, resume, cooldown (pause-only), min spend, kill switch.
+ * ZERO COOLDOWN: pause/resume happens instantly every check.
+ * Handles: pause, resume, min spend, kill switch.
  */
 async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) {
   let paused = 0;
   let resumed = 0;
-  let skippedCooldown = 0;
   let skippedMinSpend = 0;
   let checked = 0;
 
   const conditions = rule.conditions || [];
-  if (!conditions.length) return { paused, resumed, skippedCooldown, skippedMinSpend, checked };
+  if (!conditions.length) return { paused, resumed, skippedMinSpend, checked };
 
   const minSpend = parseFloat(rule.min_spend_threshold) || DEFAULT_MIN_SPEND;
   const isKillSwitch = rule.action_type === 'kill_switch';
@@ -203,20 +204,11 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
       return evaluateCondition(value, cond.operator, parseFloat(cond.value));
     });
 
-    // ── CASE 1: Conditions met + entity is running → PAUSE ──
+    // ── CASE 1: Conditions met + entity is running → PAUSE IMMEDIATELY ──
+    // ZERO COOLDOWN: No waiting. If metrics are bad RIGHT NOW, pause RIGHT NOW.
     if (allConditionsMet && !isPausedByUs) {
       // Only pause entities that are currently ACTIVE on Meta's side
       if (entity.status !== 'ACTIVE') continue;
-
-      // Check cooldown — only for PAUSE actions
-      const cooldownMinutes = rule.cooldown_minutes || 0;
-      if (cooldownMinutes > 0) {
-        const canPause = await checkPauseCooldown(supabase, rule.id, entityId, cooldownMinutes);
-        if (!canPause) {
-          skippedCooldown++;
-          continue;
-        }
-      }
 
       // ── EXECUTE PAUSE ───────────────────────────────────
       try {
@@ -251,8 +243,8 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
         await logLiveAction(supabase, rule, entityId, entity, 'failed', err.message);
       }
 
-    // ── CASE 2: Conditions NO LONGER met + WE paused it → RESUME ──
-    // Checked EVERY 60 seconds — no resume cooldown!
+    // ── CASE 2: Conditions NO LONGER met + WE paused it → RESUME IMMEDIATELY ──
+    // ZERO COOLDOWN: If metrics recovered, resume RIGHT NOW on this very check.
     } else if (!allConditionsMet && isPausedByUs) {
       // NEVER auto-resume kill_switch rules
       if (isKillSwitch) continue;
@@ -291,35 +283,18 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
     }
   }
 
-  return { paused, resumed, skippedCooldown, skippedMinSpend, checked };
+  return { paused, resumed, skippedMinSpend, checked };
 }
 
 
 // =============================================================
-// COOLDOWN — Only applies to PAUSE, not resume
+// COOLDOWN — REMOVED (Zero Cooldown Policy)
 // =============================================================
-
-/**
- * Check if enough time has passed since the last pause action for this rule+entity.
- * Returns true if we CAN pause (cooldown expired), false if still cooling down.
- */
-async function checkPauseCooldown(supabase, ruleId, entityExternalId, cooldownMinutes) {
-  const { data: lastAction } = await supabase
-    .from('automation_logs')
-    .select('created_at')
-    .eq('rule_id', ruleId)
-    .eq('entity_external_id', entityExternalId)
-    .eq('action_type', 'pause_ad')
-    .eq('status', 'executed')
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .single();
-
-  if (!lastAction) return true; // No previous pause — go ahead
-
-  const minutesSince = (Date.now() - new Date(lastAction.created_at).getTime()) / 60000;
-  return minutesSince >= cooldownMinutes;
-}
+// Cooldown logic has been completely removed.
+// Every 60s check acts independently:
+//   - Bad metrics? → PAUSE immediately
+//   - Good metrics? → RESUME immediately
+// No waiting, no delays, no cooldown period.
 
 
 // =============================================================

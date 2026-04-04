@@ -27,7 +27,7 @@ export async function POST(request) {
       conditions: body.conditions,
       action_type: body.action_type,
       action_params: body.action_params,
-      cooldown_minutes: body.cooldown_minutes ?? 60,
+      cooldown_minutes: 0, // ZERO COOLDOWN: always instant pause & resume
       max_triggers_per_day: body.max_triggers_per_day || 10,
       min_spend_threshold: body.min_spend_threshold ?? 1.00,
       requires_approval: body.requires_approval || false,

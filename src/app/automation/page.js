@@ -291,7 +291,7 @@ function AutomationContent() {
               IF {fmtConditions(rule.conditions)} → {fmtAction(rule.action_type, rule.action_params)}
             </div>
             <div className="flex items-center gap-4 text-xs text-muted-foreground flex-wrap">
-              <span><Clock size={10} className="inline mr-1" />Cooldown: {fmtCooldown(rule.cooldown_minutes)}</span>
+              <span><Clock size={10} className="inline mr-1" />Cooldown: None (instant)</span>
               {isLive && <span>Min spend: ${parseFloat(rule.min_spend_threshold || 1).toFixed(2)}</span>}
               <span>Last: {rule.last_triggered_at ? timeAgo(rule.last_triggered_at) : 'Never'}</span>
               <span>Triggers: {rule.trigger_count || 0}/{rule.max_triggers_per_day}</span>
@@ -380,7 +380,7 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
   const [scope, setScope] = useState(rule?.scope || 'ad');
   const [actionType, setActionType] = useState(rule?.action_type || 'auto_pause_resume');
   const [conditions, setConditions] = useState(rule?.conditions || [{ metric: 'cpr', operator: '>', value: '', period: 'today' }]);
-  const [cooldown, setCooldown] = useState(rule?.cooldown_minutes || 15);
+  // ZERO COOLDOWN: No cooldown setting needed — always instant
   const [maxTriggers, setMaxTriggers] = useState(rule?.max_triggers_per_day || 50);
   const [dryRun, setDryRun] = useState(rule?.dry_run || false);
   const [minSpend, setMinSpend] = useState(rule?.min_spend_threshold ?? 1);
@@ -480,7 +480,7 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
       conditions,
       action_type: actionType,
       action_params: Object.keys(actionParams).length ? actionParams : null,
-      cooldown_minutes: cooldown,
+      cooldown_minutes: 0,
       max_triggers_per_day: maxTriggers,
       min_spend_threshold: parseFloat(minSpend) || 1,
       dry_run: dryRun,
@@ -664,8 +664,8 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
 
             {isLiveScope && (
               <div className="rounded-lg px-4 py-3 bg-primary/5 border border-primary/20 text-xs text-foreground">
-                <p className="font-semibold text-primary mb-1">⚡ Live Monitor Rule</p>
-                <p className="text-muted-foreground">Checked every 60 seconds using LIVE Meta API data. Pauses ads when thresholds are breached. Auto-resumes the MOMENT metrics recover.</p>
+                <p className="font-semibold text-primary mb-1">⚡ Live Monitor Rule — ZERO COOLDOWN</p>
+                <p className="text-muted-foreground">Checked every 60 seconds using LIVE Meta API data. <strong>NO cooldown</strong> — if metrics breach, ad is paused INSTANTLY. If metrics recover on the very next check, ad is resumed INSTANTLY. No waiting period.</p>
               </div>
             )}
 
@@ -682,7 +682,7 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
                 <option value="send_alert">Send alert only</option>
               </select>
               {actionType === 'auto_pause_resume' && (
-                <p className="text-[10px] text-success mt-1">✅ Pauses when CPR/CPC breaches threshold → auto-resumes within 60s when metrics recover. Fully automated.</p>
+                <p className="text-[10px] text-success mt-1">✅ ZERO COOLDOWN: Pauses INSTANTLY when metrics breach → resumes INSTANTLY on next check when metrics recover. Every 60s check acts independently.</p>
               )}
               {actionType === 'kill_switch' && (
                 <p className="text-[10px] text-destructive mt-1">⚠️ Permanently pauses — will NEVER auto-resume. Manual re-enable required from the paused ads section.</p>
@@ -698,24 +698,11 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
 
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-medium text-muted-foreground uppercase mb-1.5">
-                  Pause Cooldown
-                  <span className="text-[10px] font-normal ml-1 text-muted-foreground">(min wait between pauses)</span>
-                </label>
-                <select value={cooldown} onChange={e => setCooldown(parseInt(e.target.value))} className={inputCls}>
-                  <option value={0}>None (instant)</option>
-                  <option value={5}>5 minutes</option>
-                  <option value={10}>10 minutes</option>
-                  <option value={15}>15 minutes</option>
-                  <option value={30}>30 minutes</option>
-                  <option value={45}>45 minutes</option>
-                  <option value={50}>50 minutes</option>
-                  <option value={60}>1 hour</option>
-                  <option value={120}>2 hours</option>
-                  <option value={360}>6 hours</option>
-                  <option value={720}>12 hours</option>
-                  <option value={1440}>24 hours</option>
-                </select>
+                <label className="block text-xs font-medium text-muted-foreground uppercase mb-1.5">Cooldown</label>
+                <div className="flex items-center gap-2 px-3 py-2.5 text-sm border border-success/30 rounded-lg bg-success/5 text-success font-medium">
+                  <Zap size={14} /> None — Instant pause & resume
+                </div>
+                <p className="text-[10px] text-muted-foreground mt-1">Every 60s check acts independently. No waiting between actions.</p>
               </div>
               <div>
                 <label className="block text-xs font-medium text-muted-foreground uppercase mb-1.5">Max Triggers/Day</label>
@@ -736,10 +723,11 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
 
             {isLiveScope && (
               <div className="rounded-lg px-4 py-3 bg-success/5 border border-success/20 text-xs text-foreground">
-                <p className="font-semibold text-success mb-1">🔄 How it works</p>
+                <p className="font-semibold text-success mb-1">⚡ How it works — ZERO COOLDOWN</p>
                 <p className="text-muted-foreground">
-                  Every 60 seconds: checks live metrics → if CPR/CPC exceeds threshold, ad gets <strong>paused</strong> →
-                  when metrics recover, ad gets <strong>auto-resumed</strong> immediately. You can also manually resume from the "Auto-Paused Ads" section above.
+                  Every 60 seconds: checks live metrics → if CPR/CPC exceeds threshold, ad gets <strong>paused instantly</strong> →
+                  on the very next check (60s), if metrics recover, ad gets <strong>resumed instantly</strong>. No waiting period, no cooldown.
+                  You can also manually resume from the "Auto-Paused Ads" section above.
                 </p>
               </div>
             )}
