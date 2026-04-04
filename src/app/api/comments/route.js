@@ -7,9 +7,12 @@ const META_GRAPH_URL = 'https://graph.facebook.com/v18.0';
 const FB_FIELDS = 'id,message,from{name,id},created_time,like_count,comment_count,is_hidden,attachment';
 const IG_FIELDS = 'id,text,timestamp,from{id,username},like_count,hidden,replies{id}';
 
-// Get Page tokens + Instagram Business Account → Page mapping (1 API call)
+// Get Page tokens + Instagram Business Account → Page mapping
+// Uses BOTH live /me/accounts AND stored page_tokens from database
 async function getPageTokens(userAccessToken) {
   const pages = {}, igMap = {};
+  
+  // 1. Try live fetch from Meta API
   try {
     let url = `${META_GRAPH_URL}/me/accounts?fields=id,name,access_token,instagram_business_account&limit=100&access_token=${userAccessToken}`;
     while (url) {
@@ -23,6 +26,26 @@ async function getPageTokens(userAccessToken) {
       url = json.paging?.next || null;
     }
   } catch (e) { console.error('Page tokens error:', e.message); }
+
+  // 2. ALSO load stored page tokens from database (fallback for pages not in /me/accounts)
+  try {
+    const supabase = getSupabaseServer();
+    const { data: storedPages } = await supabase
+      .from('page_tokens')
+      .select('page_id, page_name, page_access_token, instagram_account_id');
+    
+    for (const sp of (storedPages || [])) {
+      // Only add if NOT already found via live API (live tokens are fresher)
+      if (!pages[sp.page_id] && sp.page_access_token) {
+        pages[sp.page_id] = { token: sp.page_access_token, name: sp.page_name };
+      }
+      // Also fill IG map from stored data
+      if (sp.instagram_account_id && !igMap[sp.instagram_account_id]) {
+        igMap[sp.instagram_account_id] = sp.page_id;
+      }
+    }
+  } catch (e) { console.error('Stored page tokens error:', e.message); }
+
   return { pages, igMap };
 }
 
