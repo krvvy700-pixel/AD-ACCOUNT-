@@ -212,10 +212,15 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
 
       // ── EXECUTE PAUSE ───────────────────────────────────
       try {
-        const pauseFn = rule.scope === 'ad' ? pauseEntity : pauseEntity;
-        await retryWithBackoff(() => pauseFn(entityId, entity.accessToken));
+        await retryWithBackoff(() => pauseEntity(entityId, entity.accessToken));
 
-        // Track in paused_ads (upsert to prevent duplicates)
+        // Clean up any old resumed records for this entity, then insert fresh
+        await supabase.from('automation_paused_ads')
+          .delete()
+          .eq('ad_external_id', entityId)
+          .eq('is_paused', false);
+
+        // Track in paused_ads (upsert for currently-active pause)
         await supabase.from('automation_paused_ads').upsert({
           ad_external_id: entityId,
           ad_name: entity.entityName,
@@ -479,21 +484,21 @@ function mergeInsightsAndStatuses(insights, statuses, dataMap, account) {
   for (const item of insights) {
     dataMap[item.entityId] = {
       ...item,
-      status: statuses[item.entityId] || 'UNKNOWN',
+      status: statuses[item.entityId]?.status || 'UNKNOWN',
       accountId: account.meta_account_id,
       accessToken: account.access_token,
     };
   }
 
   // Also add entities with 0 spend (exist but no insights today)
-  for (const [entityId, status] of Object.entries(statuses)) {
+  for (const [entityId, info] of Object.entries(statuses)) {
     if (!dataMap[entityId]) {
       dataMap[entityId] = {
         entityId,
-        entityName: entityId,
+        entityName: info.name || entityId, // Use actual name from status fetch
         spend: 0, results: 0, cpr: 0, impressions: 0, clicks: 0,
         cpc: 0, ctr: 0, cpm: 0,
-        status,
+        status: info.status || 'UNKNOWN',
         accountId: account.meta_account_id,
         accessToken: account.access_token,
       };
@@ -564,7 +569,11 @@ async function fetchAllLiveInsights(accountId, accessToken, level = 'ad') {
  * Returns { entityId: 'ACTIVE' | 'PAUSED' | ... }
  */
 async function fetchEntityStatuses(accountId, accessToken, type = 'ads') {
-  let url = `${META_GRAPH_URL}/act_${accountId}/${type}?fields=id,name,status&limit=500&access_token=${accessToken}`;
+  // Only fetch ACTIVE + PAUSED entities — skip ARCHIVED/DELETED for efficiency
+  const statusFilter = encodeURIComponent(
+    JSON.stringify([{ field: 'effective_status', operator: 'IN', value: ['ACTIVE', 'PAUSED'] }])
+  );
+  let url = `${META_GRAPH_URL}/act_${accountId}/${type}?fields=id,name,status&filtering=${statusFilter}&limit=500&access_token=${accessToken}`;
   const map = {};
 
   while (url) {
@@ -572,7 +581,7 @@ async function fetchEntityStatuses(accountId, accessToken, type = 'ads') {
     if (!res.ok) return map; // Don't crash on status fetch failure
     const json = await res.json();
     for (const entity of (json.data || [])) {
-      map[entity.id] = entity.status;
+      map[entity.id] = { status: entity.status, name: entity.name };
     }
     url = json.paging?.next || null;
   }
