@@ -90,7 +90,7 @@ export async function GET(request) {
       });
     }
 
-    // ── LIST PAGES ──────────────────────────────────────────
+    // ── LIST PAGES (with debug info) ────────────────────────
     if (action === 'pages') {
       return NextResponse.json({
         pages: pageList.map(p => ({
@@ -105,74 +105,38 @@ export async function GET(request) {
       let messages = [];
       let conversationInfo = null;
 
-      if (convPlatform === 'instagram') {
-        // Instagram conversation messages
-        for (const page of pageList) {
-          if (!page.igId) continue;
-          try {
-            const res = await fetch(
-              `${META_GRAPH_URL}/${conversationId}?` +
-              `fields=id,participants,updated_time,messages.limit(${limit}){id,message,from,to,created_time,attachments}` +
-              `&access_token=${page.token}`
-            );
-            if (!res.ok) continue;
-            const data = await res.json();
-            
-            conversationInfo = {
-              id: data.id,
-              participants: data.participants?.data || [],
-              updatedTime: data.updated_time,
-              pageId: page.id,
-              pageName: page.name,
-              igId: page.igId,
-              platform: 'instagram',
-            };
-            
-            messages = (data.messages?.data || []).map(m => ({
-              id: m.id,
-              message: m.message || '',
-              from: m.from,
-              to: m.to?.data || [],
-              createdAt: m.created_time,
-              attachments: m.attachments?.data || [],
-            }));
-            
-            break;
-          } catch { continue; }
-        }
-      } else {
-        // Facebook Messenger messages
-        for (const page of pageList) {
-          try {
-            const res = await fetch(
-              `${META_GRAPH_URL}/${conversationId}?` +
-              `fields=id,participants,updated_time,messages.limit(${limit}){id,message,from,to,created_time,attachments}` +
-              `&access_token=${page.token}`
-            );
-            if (!res.ok) continue;
-            const data = await res.json();
-            
-            conversationInfo = {
-              id: data.id,
-              participants: data.participants?.data || [],
-              updatedTime: data.updated_time,
-              pageId: page.id,
-              pageName: page.name,
-              platform: 'facebook',
-            };
-            
-            messages = (data.messages?.data || []).map(m => ({
-              id: m.id,
-              message: m.message || '',
-              from: m.from,
-              to: m.to?.data || [],
-              createdAt: m.created_time,
-              attachments: m.attachments?.data || [],
-            }));
-            
-            break;
-          } catch { continue; }
-        }
+      // Try ALL pages until one works (works for both FB and IG)
+      for (const page of pageList) {
+        try {
+          const res = await fetch(
+            `${META_GRAPH_URL}/${conversationId}?` +
+            `fields=id,participants,updated_time,messages.limit(${limit}){id,message,from,to,created_time,attachments}` +
+            `&access_token=${page.token}`
+          );
+          if (!res.ok) continue;
+          const data = await res.json();
+          
+          conversationInfo = {
+            id: data.id,
+            participants: data.participants?.data || [],
+            updatedTime: data.updated_time,
+            pageId: page.id,
+            pageName: page.name,
+            igId: page.igId,
+            platform: convPlatform,
+          };
+          
+          messages = (data.messages?.data || []).map(m => ({
+            id: m.id,
+            message: m.message || '',
+            from: m.from,
+            to: m.to?.data || [],
+            createdAt: m.created_time,
+            attachments: m.attachments?.data || [],
+          }));
+          
+          break;
+        } catch { continue; }
       }
 
       return NextResponse.json({ conversation: conversationInfo, messages });
@@ -180,6 +144,7 @@ export async function GET(request) {
 
     // ── LIST CONVERSATIONS (FB + IG) ────────────────────────
     const allConversations = [];
+    const igErrors = [];
     const targetPages = pageFilter 
       ? pageList.filter(p => p.id === pageFilter)
       : pageList;
@@ -217,70 +182,135 @@ export async function GET(request) {
                 });
               }
             } catch (e) {
-              console.error(`[Messages] FB conversations failed for ${page.name}:`, e.message);
+              console.error(`[Messages] FB failed for ${page.name}:`, e.message);
             }
           })()
         );
       }
 
       // ── Instagram DM conversations ──
-      if ((platformFilter === 'all' || platformFilter === 'instagram') && page.igId) {
+      // Strategy 1: Use PAGE-level endpoint with platform=instagram (most reliable)
+      // Strategy 2: Use IG account endpoint as fallback
+      // NO igId check — we try the page endpoint for ALL pages
+      if (platformFilter === 'all' || platformFilter === 'instagram') {
         fetchPromises.push(
           (async () => {
+            let igFound = false;
+
+            // STRATEGY 1: Page-level conversations with platform=instagram
+            // This works even without knowing the igId
             try {
               const res = await fetch(
-                `${META_GRAPH_URL}/${page.igId}/conversations?` +
-                `fields=id,participants,updated_time,messages.limit(1){message,from,created_time}` +
+                `${META_GRAPH_URL}/${page.id}/conversations?` +
+                `fields=id,participants,updated_time,message_count,snippet,unread_count` +
                 `&platform=instagram` +
                 `&limit=${limit}` +
                 `&access_token=${page.token}`
               );
-              if (!res.ok) {
-                const err = await res.json().catch(() => ({}));
-                console.error(`[Messages] IG DMs failed for ${page.name}:`, err.error?.message || res.status);
-                return;
-              }
-              const data = await res.json();
               
-              for (const conv of (data.data || [])) {
-                const participants = conv.participants?.data || [];
-                const customer = participants.find(p => p.id !== page.igId) || participants[0];
-                const lastMsg = conv.messages?.data?.[0];
-                
-                allConversations.push({
-                  id: conv.id,
-                  snippet: lastMsg?.message || '',
-                  updatedTime: conv.updated_time || lastMsg?.created_time,
-                  messageCount: 0,
-                  unreadCount: 0,
-                  customerName: customer?.username || customer?.name || 'IG User',
-                  customerId: customer?.id || null,
-                  pageId: page.id,
-                  pageName: page.name,
-                  igId: page.igId,
-                  platform: 'instagram',
-                });
+              if (res.ok) {
+                const data = await res.json();
+                for (const conv of (data.data || [])) {
+                  const participants = conv.participants?.data || [];
+                  const customer = participants.find(p => p.id !== page.id && p.id !== page.igId) || participants[0];
+                  
+                  allConversations.push({
+                    id: conv.id,
+                    snippet: conv.snippet || '',
+                    updatedTime: conv.updated_time,
+                    messageCount: conv.message_count || 0,
+                    unreadCount: conv.unread_count || 0,
+                    customerName: customer?.username || customer?.name || 'IG User',
+                    customerId: customer?.id || null,
+                    pageId: page.id,
+                    pageName: page.name,
+                    igId: page.igId,
+                    platform: 'instagram',
+                  });
+                  igFound = true;
+                }
+                if (data.data?.length > 0) igFound = true;
+              } else {
+                const err = await res.json().catch(() => ({}));
+                console.error(`[Messages] IG via page ${page.name}:`, err.error?.message || res.status);
+                igErrors.push(`${page.name}: ${err.error?.message || res.status}`);
               }
             } catch (e) {
-              console.error(`[Messages] IG DMs failed for ${page.name}:`, e.message);
+              console.error(`[Messages] IG page-level for ${page.name}:`, e.message);
+            }
+
+            // STRATEGY 2: IG account direct endpoint (fallback)
+            if (!igFound && page.igId) {
+              try {
+                const res = await fetch(
+                  `${META_GRAPH_URL}/${page.igId}/conversations?` +
+                  `fields=id,participants,updated_time,messages.limit(1){message,from,created_time}` +
+                  `&limit=${limit}` +
+                  `&access_token=${page.token}`
+                );
+                
+                if (res.ok) {
+                  const data = await res.json();
+                  for (const conv of (data.data || [])) {
+                    const participants = conv.participants?.data || [];
+                    const customer = participants.find(p => p.id !== page.igId) || participants[0];
+                    const lastMsg = conv.messages?.data?.[0];
+                    
+                    allConversations.push({
+                      id: conv.id,
+                      snippet: lastMsg?.message || '',
+                      updatedTime: conv.updated_time || lastMsg?.created_time,
+                      messageCount: 0,
+                      unreadCount: 0,
+                      customerName: customer?.username || customer?.name || 'IG User',
+                      customerId: customer?.id || null,
+                      pageId: page.id,
+                      pageName: page.name,
+                      igId: page.igId,
+                      platform: 'instagram',
+                    });
+                  }
+                } else {
+                  const err = await res.json().catch(() => ({}));
+                  console.error(`[Messages] IG direct for ${page.name}:`, err.error?.message || res.status);
+                  if (!igErrors.find(e => e.startsWith(page.name))) {
+                    igErrors.push(`${page.name}: ${err.error?.message || res.status}`);
+                  }
+                }
+              } catch (e) {
+                console.error(`[Messages] IG direct for ${page.name}:`, e.message);
+              }
             }
           })()
         );
       }
     }
 
-    // Fetch all in parallel — FB + IG simultaneously
     await Promise.all(fetchPromises);
-
-    // Sort by most recent
     allConversations.sort((a, b) => new Date(b.updatedTime) - new Date(a.updatedTime));
 
+    // Deduplicate conversations (same conv might appear from both strategies)
+    const seen = new Set();
+    const dedupedConversations = [];
+    for (const conv of allConversations) {
+      if (!seen.has(conv.id)) {
+        seen.add(conv.id);
+        dedupedConversations.push(conv);
+      }
+    }
+
     return NextResponse.json({
-      conversations: allConversations,
+      conversations: dedupedConversations,
       pages: pageList.map(p => ({ id: p.id, name: p.name, hasIg: !!p.igId, igId: p.igId })),
-      total: allConversations.length,
-      fbCount: allConversations.filter(c => c.platform === 'facebook').length,
-      igCount: allConversations.filter(c => c.platform === 'instagram').length,
+      total: dedupedConversations.length,
+      fbCount: dedupedConversations.filter(c => c.platform === 'facebook').length,
+      igCount: dedupedConversations.filter(c => c.platform === 'instagram').length,
+      // Debug info — helps diagnose issues
+      _debug: {
+        pagesChecked: targetPages.length,
+        pagesWithIg: targetPages.filter(p => p.igId).length,
+        igErrors: igErrors.length > 0 ? igErrors : undefined,
+      },
     });
 
   } catch (e) {

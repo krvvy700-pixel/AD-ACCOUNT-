@@ -34,6 +34,7 @@ export default function MessagesPage() {
   const [platformFilter, setPlatformFilter] = useState('all');
   const [fbCount, setFbCount] = useState(0);
   const [igCount, setIgCount] = useState(0);
+  const [debugInfo, setDebugInfo] = useState(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -51,6 +52,7 @@ export default function MessagesPage() {
       if (data.pages) setPages(data.pages);
       if (data.fbCount != null) setFbCount(data.fbCount);
       if (data.igCount != null) setIgCount(data.igCount);
+      if (data._debug) setDebugInfo(data._debug);
     } catch {}
     setLoading(false);
   }, [pageFilter, platformFilter]);
@@ -233,6 +235,19 @@ export default function MessagesPage() {
               </select>
             </div>
           </div>
+
+          {/* IG Debug Banner */}
+          {debugInfo?.igErrors?.length > 0 && (
+            <div className="mx-4 mt-2 px-3 py-2 rounded-lg bg-yellow-500/10 border border-yellow-500/20 text-xs">
+              <span className="font-medium text-yellow-600">⚠️ Instagram DMs:</span>
+              {debugInfo.igErrors.map((err, i) => (
+                <div key={i} className="text-yellow-600/80 mt-0.5 ml-4">• {err}</div>
+              ))}
+              <div className="text-yellow-600/60 mt-1">
+                Pages: {debugInfo.pagesChecked} checked, {debugInfo.pagesWithIg} with IG linked
+              </div>
+            </div>
+          )}
 
           {/* Conversations */}
           <div className="flex-1 overflow-y-auto">
