@@ -6,7 +6,7 @@ import { useCurrency } from '@/context/CurrencyContext';
 import {
   Zap, Plus, Play, Pause, Edit2, Trash2, Clock, Shield, RotateCcw, X,
   AlertTriangle, Activity, Search, ChevronDown, Image, CheckSquare,
-  Loader2, Eye,
+  Loader2, Eye, Wifi, WifiOff, RefreshCw, PlayCircle,
 } from 'lucide-react';
 
 export default function AutomationPage() {
@@ -29,10 +29,45 @@ function AutomationContent() {
   const [prefilledCampaign, setPrefilledCampaign] = useState(null);
   const [lastEvaluation, setLastEvaluation] = useState(null);
 
+  // Cron health state
+  const [cronHealth, setCronHealth] = useState(null);
+  const [runningNow, setRunningNow] = useState(false);
+  const [runResult, setRunResult] = useState(null);
+
   // Paused ads state
   const [pausedAds, setPausedAds] = useState([]);
   const [pausedLoading, setPausedLoading] = useState(false);
   const [resumingId, setResumingId] = useState(null);
+
+  // Fetch cron health
+  const fetchCronHealth = useCallback(async () => {
+    try {
+      const res = await fetch('/api/automation/live-evaluate');
+      const data = await res.json();
+      setCronHealth(data);
+    } catch {}
+  }, []);
+
+  // Run evaluation NOW (manual trigger)
+  const handleRunNow = async () => {
+    setRunningNow(true);
+    setRunResult(null);
+    try {
+      const res = await fetch('/api/automation/live-evaluate', {
+        method: 'POST',
+        headers: { 'x-manual-trigger': 'true' },
+      });
+      const data = await res.json();
+      setRunResult(data);
+      // Refresh everything after manual run
+      await Promise.all([fetchData(), fetchCronHealth()]);
+    } catch (e) {
+      setRunResult({ error: e.message });
+    }
+    setRunningNow(false);
+    // Clear result after 10s
+    setTimeout(() => setRunResult(null), 10000);
+  };
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -56,13 +91,16 @@ function AutomationContent() {
     setLoading(false);
   }, []);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => { fetchData(); fetchCronHealth(); }, [fetchData, fetchCronHealth]);
 
   // Auto-refresh every 30s
   useEffect(() => {
-    const interval = setInterval(fetchData, 30000);
+    const interval = setInterval(() => {
+      fetchData();
+      fetchCronHealth();
+    }, 30000);
     return () => clearInterval(interval);
-  }, [fetchData]);
+  }, [fetchData, fetchCronHealth]);
 
   // Auto-open modal if campaign param is present
   useEffect(() => {
@@ -145,8 +183,81 @@ function AutomationContent() {
   const liveRulesCount = rules.filter(r => r.scope === 'ad' || r.scope === 'ad_set').length;
   const activeRulesCount = rules.filter(r => r.is_active).length;
 
+  const cronColor = cronHealth?.health === 'healthy' ? 'text-success' : cronHealth?.health === 'warning' ? 'text-warning' : 'text-destructive';
+  const cronBgColor = cronHealth?.health === 'healthy' ? 'bg-success/10 border-success/20' : cronHealth?.health === 'warning' ? 'bg-warning/10 border-warning/20' : 'bg-destructive/10 border-destructive/20';
+
   return (
     <AppShell title="Automation">
+      {/* Cron Health Banner */}
+      <div className={`rounded-xl border p-4 mb-6 ${cronBgColor}`}>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            {/* Status indicator */}
+            <div className={`flex items-center gap-2 ${cronColor}`}>
+              {cronHealth?.healthy ? (
+                <Wifi size={18} className="animate-pulse" />
+              ) : cronHealth?.health === 'never_run' ? (
+                <WifiOff size={18} />
+              ) : (
+                <WifiOff size={18} />
+              )}
+              <div>
+                <div className="text-sm font-semibold">
+                  Cron: {cronHealth?.healthy ? '🟢 Healthy' : cronHealth?.health === 'warning' ? '🟡 Delayed' : cronHealth?.health === 'never_run' ? '⚪ Not Set Up' : '🔴 Down'}
+                </div>
+                <div className="text-[10px] opacity-80">
+                  {cronHealth?.lastRunAt ? `Last run: ${cronHealth.lastRunAge} (${cronHealth.source})` : 'Never executed'}
+                </div>
+              </div>
+            </div>
+
+            {/* Last run stats */}
+            {cronHealth?.lastResult && cronHealth.status === 'success' && (
+              <div className="flex items-center gap-3 text-xs text-muted-foreground border-l border-border pl-4">
+                <span>{cronHealth.lastResult.evaluated} ads checked</span>
+                <span>{cronHealth.lastResult.rulesChecked} rules</span>
+                {cronHealth.lastResult.paused > 0 && <span className="text-warning font-bold">⏸ {cronHealth.lastResult.paused} paused</span>}
+                {cronHealth.lastResult.resumed > 0 && <span className="text-success font-bold">▶ {cronHealth.lastResult.resumed} resumed</span>}
+                <span>{cronHealth.lastResult.elapsedMs}ms</span>
+              </div>
+            )}
+
+            {cronHealth?.lastResult?.error && (
+              <span className="text-xs text-destructive">⚠ {cronHealth.lastResult.error}</span>
+            )}
+          </div>
+
+          {/* Run Now button */}
+          <button
+            onClick={handleRunNow}
+            disabled={runningNow}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-lg bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50 transition-opacity"
+          >
+            {runningNow ? (
+              <><Loader2 size={14} className="animate-spin" /> Evaluating...</>
+            ) : (
+              <><PlayCircle size={14} /> Run Now</>
+            )}
+          </button>
+        </div>
+
+        {/* Run result banner */}
+        {runResult && (
+          <div className={`mt-3 rounded-lg px-3 py-2 text-xs ${runResult.error ? 'bg-destructive/10 text-destructive' : 'bg-success/10 text-success'}`}>
+            {runResult.error ? (
+              <span>❌ Evaluation failed: {runResult.error}</span>
+            ) : (
+              <span>
+                ✅ Evaluated {runResult.evaluated} entities across {runResult.rules} rules in {runResult.elapsed_ms}ms
+                {runResult.paused > 0 && ` — ⏸ ${runResult.paused} paused`}
+                {runResult.resumed > 0 && ` — ▶ ${runResult.resumed} resumed`}
+                {runResult.skipped > 0 && ` — ⏭ ${runResult.skipped} skipped (min spend)`}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
@@ -166,9 +277,6 @@ function AutomationContent() {
                 <Pause size={10} />
                 {pausedAds.length} ads auto-paused
               </span>
-            )}
-            {lastEvaluation && (
-              <span>Last check: {timeAgo(lastEvaluation)}</span>
             )}
           </div>
         </div>
