@@ -148,6 +148,20 @@ export async function evaluateLiveRules() {
     `${totalPaused} paused, ${totalResumed} resumed, ${totalSkipped} skipped`
   );
 
+  // Build diagnostic data — top breaching ads
+  const diagnostics = {};
+  for (const r of results) {
+    if (r._breaching) {
+      diagnostics[r.rule] = {
+        totalBreaching: r._breaching.length,
+        breachingAds: r._breaching.slice(0, 20), // Top 20
+        failedPauses: r._failedPauses || [],
+        skippedNotActive: r._skippedNotActive || 0,
+        skippedAlreadyPaused: r._skippedAlreadyPaused || 0,
+      };
+    }
+  }
+
   return {
     evaluated: Object.keys(liveAdData).length + Object.keys(liveAdSetData).length,
     rules: rules.length,
@@ -155,7 +169,13 @@ export async function evaluateLiveRules() {
     resumed: totalResumed,
     skipped: totalSkipped,
     elapsed_ms: elapsed,
-    results,
+    diagnostics,
+    results: results.map(r => ({
+      rule: r.rule, ruleId: r.ruleId, scope: r.scope,
+      paused: r.paused, resumed: r.resumed,
+      checked: r.checked, skippedMinSpend: r.skippedMinSpend,
+      error: r.error,
+    })),
   };
 }
 
@@ -174,6 +194,12 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
   let resumed = 0;
   let skippedMinSpend = 0;
   let checked = 0;
+  let skippedNotActive = 0;
+  let skippedAlreadyPaused = 0;
+
+  // Diagnostic tracking
+  const breachingAds = [];
+  const failedPauses = [];
 
   const conditions = rule.conditions || [];
   if (!conditions.length) return { paused, resumed, skippedMinSpend, checked };
@@ -191,8 +217,6 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
     const isPausedByUs = !!pausedMap[entityId];
 
     // ── MIN SPEND GUARD ─────────────────────────────────────
-    // Don't evaluate metrics-based rules on low-data entities
-    // (prevents CPC=Infinity on $0.10 spend / 0 clicks)
     if (entity.spend < minSpend && !isPausedByUs) {
       skippedMinSpend++;
       continue;
@@ -205,23 +229,33 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
     });
 
     // ── CASE 1: Conditions met + entity is running → PAUSE IMMEDIATELY ──
-    // ZERO COOLDOWN: No waiting. If metrics are bad RIGHT NOW, pause RIGHT NOW.
     if (allConditionsMet && !isPausedByUs) {
-      // Only pause entities that are currently ACTIVE on Meta's side
-      if (entity.status !== 'ACTIVE') continue;
+      // Track ALL breaching ads for diagnostics
+      breachingAds.push({
+        id: entityId,
+        name: entity.entityName,
+        cpr: entity.cpr,
+        spend: entity.spend,
+        results: entity.results,
+        status: entity.status,
+      });
+
+      if (entity.status !== 'ACTIVE') {
+        skippedNotActive++;
+        continue;
+      }
 
       // ── EXECUTE PAUSE ───────────────────────────────────
       try {
         await retryWithBackoff(() => pauseEntity(entityId, entity.accessToken));
 
-        // Clean up any old resumed records for this entity, then insert fresh
+        // RELIABLE TRACKING: delete any old rows, then insert fresh
+        // (avoids partial unique index issues with upsert)
         await supabase.from('automation_paused_ads')
           .delete()
-          .eq('ad_external_id', entityId)
-          .eq('is_paused', false);
+          .eq('ad_external_id', entityId);
 
-        // Track in paused_ads (upsert for currently-active pause)
-        await supabase.from('automation_paused_ads').upsert({
+        await supabase.from('automation_paused_ads').insert({
           ad_external_id: entityId,
           ad_name: entity.entityName,
           rule_id: rule.id,
@@ -231,9 +265,6 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
           paused_at: new Date().toISOString(),
           resumed_at: null,
           is_paused: true,
-        }, {
-          onConflict: 'ad_external_id',
-          ignoreDuplicates: false,
         });
 
         await logLiveAction(supabase, rule, entityId, entity, 'paused');
@@ -245,27 +276,22 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
         );
       } catch (err) {
         console.error(`[LiveMonitor] Failed to pause ${entityId}:`, err.message);
-        await logLiveAction(supabase, rule, entityId, entity, 'failed', err.message);
+        failedPauses.push({ id: entityId, name: entity.entityName, error: err.message });
+        try {
+          await logLiveAction(supabase, rule, entityId, entity, 'failed', err.message);
+        } catch {}
       }
 
     // ── CASE 2: Conditions NO LONGER met + WE paused it → RESUME IMMEDIATELY ──
-    // ZERO COOLDOWN: If metrics recovered, resume RIGHT NOW on this very check.
     } else if (!allConditionsMet && isPausedByUs) {
-      // NEVER auto-resume kill_switch rules
       if (isKillSwitch) continue;
 
-      // Also check: did the SAME rule pause it?
-      // Only resume if the rule that paused it is the one that no longer matches
       const pauseRecord = pausedMap[entityId];
       if (pauseRecord.rule_id !== rule.id) continue;
-
-      // If spend dropped below min_spend, still resume (it was paused for a reason, now metrics recovered)
-      // We check conditions against current live data regardless
 
       try {
         await retryWithBackoff(() => enableEntity(entityId, entity.accessToken));
 
-        // Update tracking
         await supabase.from('automation_paused_ads')
           .update({
             is_paused: false,
@@ -283,12 +309,19 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
         );
       } catch (err) {
         console.error(`[LiveMonitor] Failed to resume ${entityId}:`, err.message);
-        await logLiveAction(supabase, rule, entityId, entity, 'failed', err.message);
+        try {
+          await logLiveAction(supabase, rule, entityId, entity, 'failed', err.message);
+        } catch {}
       }
     }
   }
 
-  return { paused, resumed, skippedMinSpend, checked };
+  return {
+    paused, resumed, skippedMinSpend, checked,
+    skippedNotActive, skippedAlreadyPaused,
+    _breaching: breachingAds,
+    _failedPauses: failedPauses,
+  };
 }
 
 
