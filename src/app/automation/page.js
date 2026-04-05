@@ -62,8 +62,8 @@ function AutomationContent() {
       setRunResult({ error: e.message });
     }
     setRunningNow(false);
-    // Clear result after 10s
-    setTimeout(() => setRunResult(null), 10000);
+    // Clear result after 30s (longer to read diagnostics)
+    setTimeout(() => setRunResult(null), 30000);
   };
 
   const fetchData = useCallback(async () => {
@@ -236,16 +236,69 @@ function AutomationContent() {
 
         {/* Run result banner */}
         {runResult && (
-          <div className={`mt-3 rounded-lg px-3 py-2 text-xs ${runResult.error ? 'bg-destructive/10 text-destructive' : 'bg-success/10 text-success'}`}>
+          <div className={`mt-3 rounded-lg px-3 py-2 text-xs ${runResult.error ? 'bg-destructive/10 text-destructive' : 'bg-card border border-border'}`}>
             {runResult.error ? (
-              <span>❌ Evaluation failed: {runResult.error}</span>
+              <span className="text-destructive">❌ Evaluation failed: {runResult.error}</span>
             ) : (
-              <span>
-                ✅ Evaluated {runResult.evaluated} entities across {runResult.rules} rules in {runResult.elapsed_ms}ms
-                {runResult.paused > 0 && ` — ⏸ ${runResult.paused} paused`}
-                {runResult.resumed > 0 && ` — ▶ ${runResult.resumed} resumed`}
-                {runResult.skipped > 0 && ` — ⏭ ${runResult.skipped} skipped (min spend)`}
-              </span>
+              <div className="space-y-2">
+                <div className="text-success font-medium">
+                  ✅ Evaluated {runResult.evaluated} entities across {runResult.rules} rules in {runResult.elapsed_ms}ms
+                  {runResult.paused > 0 && ` — ⏸ ${runResult.paused} paused`}
+                  {runResult.resumed > 0 && ` — ▶ ${runResult.resumed} resumed`}
+                  {runResult.skipped > 0 && ` — ⏭ ${runResult.skipped} skipped (min spend < $1)`}
+                </div>
+
+                {/* Diagnostics: breaching ads */}
+                {runResult.diagnostics && Object.entries(runResult.diagnostics).map(([ruleName, diag]) => (
+                  <div key={ruleName} className="mt-2">
+                    <div className="font-semibold text-foreground mb-1">
+                      📊 "{ruleName}" — {diag.totalBreaching} ads breaching threshold
+                      {diag.skippedNotActive > 0 && <span className="text-muted-foreground"> ({diag.skippedNotActive} already paused on Meta)</span>}
+                    </div>
+
+                    {diag.failedPauses?.length > 0 && (
+                      <div className="text-destructive mb-1">
+                        ❌ Failed to pause: {diag.failedPauses.map(f => `${f.name}: ${f.error}`).join(', ')}
+                      </div>
+                    )}
+
+                    {diag.breachingAds?.length > 0 && (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-[11px] mt-1">
+                          <thead>
+                            <tr className="text-muted-foreground border-b border-border">
+                              <th className="text-left py-1 pr-3">Ad Name</th>
+                              <th className="text-left py-1 pr-3">CPR</th>
+                              <th className="text-left py-1 pr-3">Spend (today)</th>
+                              <th className="text-left py-1 pr-3">Results</th>
+                              <th className="text-left py-1 pr-3">Status</th>
+                              <th className="text-left py-1">Action</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {diag.breachingAds.map(ad => (
+                              <tr key={ad.id} className="border-b border-border/50">
+                                <td className="py-1 pr-3 font-medium text-foreground">{ad.name}</td>
+                                <td className="py-1 pr-3 text-warning font-bold">${ad.cpr?.toFixed(2)}</td>
+                                <td className="py-1 pr-3">${ad.spend?.toFixed(2)}</td>
+                                <td className="py-1 pr-3">{ad.results}</td>
+                                <td className="py-1 pr-3">
+                                  <span className={ad.status === 'ACTIVE' ? 'text-success' : 'text-muted-foreground'}>
+                                    {ad.status}
+                                  </span>
+                                </td>
+                                <td className="py-1">
+                                  {ad.status === 'ACTIVE' ? '⏸ PAUSED' : '⏭ Skipped (not active)'}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
             )}
           </div>
         )}
