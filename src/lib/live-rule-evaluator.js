@@ -30,7 +30,8 @@ const CONVERSION_PRIORITY = [
   'add_to_cart', 'omni_add_to_cart', 'offsite_conversion.fb_pixel_add_to_cart',
   'initiate_checkout', 'offsite_conversion.fb_pixel_initiate_checkout',
   'onsite_conversion.messaging_conversation_started_7d',
-  'landing_page_view', 'link_click',
+  // NOTE: landing_page_view and link_click removed — they inflate results
+  // and hide bad-performing ads (e.g. 0 purchases + 4 clicks = $0.35 CPR)
 ];
 
 // Default minimum spend before rules can fire ($)

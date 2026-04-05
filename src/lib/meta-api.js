@@ -422,8 +422,7 @@ const CONVERSION_PRIORITY = [
   'initiate_checkout',
   'offsite_conversion.fb_pixel_initiate_checkout',
   'onsite_conversion.messaging_conversation_started_7d',
-  'landing_page_view',
-  'link_click',
+  // NOTE: landing_page_view and link_click removed — they inflate results
 ];
 
 function extractConversions(actions) {
