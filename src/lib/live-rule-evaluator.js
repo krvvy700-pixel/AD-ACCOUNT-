@@ -546,7 +546,12 @@ function mergeInsightsAndStatuses(insights, statuses, dataMap, account) {
  * Returns array of { entityId, entityName, spend, results, cpr, cpc, ctr, cpm, impressions, clicks }
  */
 async function fetchAllLiveInsights(accountId, accessToken, level = 'ad') {
-  const today = new Date().toISOString().split('T')[0];
+  // Use IST (UTC+5:30) to match user's timezone and Meta account timezone
+  // Without this, at midnight IST the evaluator would check yesterday's (UTC) data
+  const now = new Date();
+  const istMs = now.getTime() + (5.5 * 60 * 60 * 1000); // Add 5h30m for IST
+  const istDate = new Date(istMs);
+  const today = istDate.toISOString().split('T')[0];
   const idField = level === 'ad' ? 'ad_id' : 'adset_id';
   const nameField = level === 'ad' ? 'ad_name' : 'adset_name';
 
