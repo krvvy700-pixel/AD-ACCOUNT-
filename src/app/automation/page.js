@@ -4,9 +4,9 @@ import { useSearchParams } from 'next/navigation';
 import AppShell from '@/components/AppShell';
 import { useCurrency } from '@/context/CurrencyContext';
 import {
-  Zap, Plus, Play, Pause, Edit2, Trash2, Clock, Shield, RotateCcw, X,
+  Zap, Plus, Play, Pause, Edit2, Trash2, Clock, RotateCcw, X,
   AlertTriangle, Activity, Search, ChevronDown, Image, CheckSquare,
-  Loader2, Eye, Wifi, WifiOff, RefreshCw, PlayCircle,
+  Loader2, Eye, Wifi, WifiOff, PlayCircle,
 } from 'lucide-react';
 
 export default function AutomationPage() {
@@ -25,9 +25,7 @@ function AutomationContent() {
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingRule, setEditingRule] = useState(null);
-  const [automationEnabled, setAutomationEnabled] = useState(true);
   const [prefilledCampaign, setPrefilledCampaign] = useState(null);
-  const [lastEvaluation, setLastEvaluation] = useState(null);
 
   // Cron health state
   const [cronHealth, setCronHealth] = useState(null);
@@ -36,7 +34,6 @@ function AutomationContent() {
 
   // Paused ads state
   const [pausedAds, setPausedAds] = useState([]);
-  const [pausedLoading, setPausedLoading] = useState(false);
   const [resumingId, setResumingId] = useState(null);
 
   // Fetch cron health
@@ -83,10 +80,6 @@ function AutomationContent() {
       if (rulesData.rules) setRules(rulesData.rules);
       if (logsData.logs) setLogs(logsData.logs);
       if (pausedData.paused) setPausedAds(pausedData.paused);
-
-      if (logsData.logs?.length > 0) {
-        setLastEvaluation(logsData.logs[0].created_at);
-      }
     } catch {}
     setLoading(false);
   }, []);
@@ -281,12 +274,6 @@ function AutomationContent() {
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <button
-            onClick={() => setAutomationEnabled(!automationEnabled)}
-            className={`flex items-center gap-2 px-3 py-1.5 text-xs font-semibold rounded-full border transition-colors ${automationEnabled ? 'bg-destructive/10 text-destructive border-destructive/20' : 'bg-success/10 text-success border-success/20'}`}
-          >
-            <Shield size={14} /> {automationEnabled ? 'Kill All' : 'Enable All'}
-          </button>
           <button onClick={() => { setEditingRule(null); setModalOpen(true); }}
             className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity"
           >
