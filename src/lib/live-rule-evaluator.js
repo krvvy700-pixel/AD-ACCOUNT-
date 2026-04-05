@@ -44,16 +44,8 @@ export async function evaluateLiveRules() {
   const supabase = getSupabaseServer();
   const startTime = Date.now();
 
-  // ── Check global kill switch ──────────────────────────────
-  const { data: setting } = await supabase
-    .from('system_settings')
-    .select('value')
-    .eq('key', 'automation_enabled')
-    .single();
-
-  if (!setting?.value?.enabled) {
-    return { skipped: true, reason: 'automation_disabled' };
-  }
+  // NOTE: automation_enabled check removed — toggle was removed from UI.
+  // Rules are always active when is_active=true. Individual rules can be toggled.
 
   // ── Load active rules (ad + ad_set scope only) ────────────
   const { data: rules, error } = await supabase
@@ -270,6 +262,14 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
 
         await logLiveAction(supabase, rule, entityId, entity, 'paused');
         paused++;
+
+        // ── UPDATE TRIGGER COUNT on the rule ────────────────
+        await supabase.from('automation_rules')
+          .update({
+            trigger_count: (rule.trigger_count || 0) + paused,
+            last_triggered_at: new Date().toISOString(),
+          })
+          .eq('id', rule.id);
 
         console.log(
           `[LiveMonitor] ⏸️  PAUSED ${rule.scope} "${entity.entityName}" ` +
