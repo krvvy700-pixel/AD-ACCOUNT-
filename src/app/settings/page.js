@@ -13,7 +13,7 @@ export default function SettingsPage() {
   const [connectStatus, setConnectStatus] = useState(null);
   const [syncDays, setSyncDays] = useState(30);
   const [syncMsg, setSyncMsg] = useState('');
-  const [autoSyncMin, setAutoSyncMin] = useState(0);
+  const [autoSyncMin, setAutoSyncMin] = useState(5);
   const [autoSyncMsg, setAutoSyncMsg] = useState('');
 
   useEffect(() => {
@@ -29,7 +29,8 @@ export default function SettingsPage() {
     const saved = localStorage.getItem('syncDays');
     if (saved) setSyncDays(parseInt(saved));
     const savedAuto = localStorage.getItem('autoSyncMinutes');
-    if (savedAuto) setAutoSyncMin(parseInt(savedAuto));
+    if (savedAuto !== null) setAutoSyncMin(parseInt(savedAuto));
+    // else: keep default of 5 min
   }, [refetchAccounts]);
 
   const handleConnect = () => { window.location.href = '/api/meta/connect'; };

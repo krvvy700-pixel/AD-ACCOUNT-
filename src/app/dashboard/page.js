@@ -97,8 +97,51 @@ export default function DashboardPage() {
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
 
-  // Fetch toggle — default OFF (no API calls until user enables)
-  const [fetchEnabled, setFetchEnabled] = useState(false);
+  // Fetch toggle — default ON, persisted in localStorage
+  const [fetchEnabled, setFetchEnabled] = useState(false); // false for SSR, restored below
+
+  // Restore all filter state from localStorage on mount
+  const filtersRestoredRef = useRef(false);
+  useEffect(() => {
+    if (filtersRestoredRef.current) return;
+    filtersRestoredRef.current = true;
+    try {
+      // fetchEnabled: default true on first visit
+      const fe = localStorage.getItem('dashboard_fetchEnabled');
+      setFetchEnabled(fe === null ? true : fe === 'true');
+      // Other filters
+      const b = localStorage.getItem('dashboard_breakdown');
+      if (b) setBreakdown(b);
+      const cm = localStorage.getItem('dashboard_chartMetric');
+      if (cm) setChartMetric(cm);
+      const sk = localStorage.getItem('dashboard_sortKey');
+      if (sk) setSortKey(sk);
+      const sd = localStorage.getItem('dashboard_sortDir');
+      if (sd) setSortDir(sd);
+      const pf = localStorage.getItem('dashboard_perfFilter');
+      if (pf !== null) setPerfFilter(pf);
+    } catch {}
+  }, []);
+
+  // Persist fetchEnabled whenever it changes
+  const fetchEnabledMountedRef = useRef(false);
+  useEffect(() => {
+    if (!fetchEnabledMountedRef.current) { fetchEnabledMountedRef.current = true; return; }
+    try { localStorage.setItem('dashboard_fetchEnabled', String(fetchEnabled)); } catch {}
+  }, [fetchEnabled]);
+
+  // Persist filters whenever they change
+  const filtersMountedRef = useRef(false);
+  useEffect(() => {
+    if (!filtersMountedRef.current) { filtersMountedRef.current = true; return; }
+    try {
+      localStorage.setItem('dashboard_breakdown', breakdown);
+      localStorage.setItem('dashboard_chartMetric', chartMetric);
+      localStorage.setItem('dashboard_sortKey', sortKey);
+      localStorage.setItem('dashboard_sortDir', sortDir);
+      localStorage.setItem('dashboard_perfFilter', perfFilter);
+    } catch {}
+  }, [breakdown, chartMetric, sortKey, sortDir, perfFilter]);
 
   // Drill-down state
   const [expandedCampaign, setExpandedCampaign] = useState(null);

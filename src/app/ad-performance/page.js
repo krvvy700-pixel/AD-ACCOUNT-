@@ -48,6 +48,47 @@ export default function AdPerformancePage() {
   const dateFrom = format(dateRange.from, 'yyyy-MM-dd');
   const dateTo = format(dateRange.to, 'yyyy-MM-dd');
 
+  // Restore all filter state from localStorage on mount
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+    try {
+      const saved = localStorage.getItem('adperf_dateRange');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.from && parsed.to) setDateRange({ from: new Date(parsed.from), to: new Date(parsed.to) });
+      }
+      const tab = localStorage.getItem('adperf_activeTab');
+      if (tab) setActiveTab(tab);
+      const ao = localStorage.getItem('adperf_activeOnly');
+      if (ao !== null) setActiveOnly(ao === 'true');
+      const sk = localStorage.getItem('adperf_sortKey');
+      if (sk) setSortKey(sk);
+      const sd = localStorage.getItem('adperf_sortDir');
+      if (sd) setSortDir(sd);
+    } catch {}
+  }, []);
+
+  // Persist dateRange when it changes
+  const dateMountedRef = useRef(false);
+  useEffect(() => {
+    if (!dateMountedRef.current) { dateMountedRef.current = true; return; }
+    try { localStorage.setItem('adperf_dateRange', JSON.stringify({ from: dateRange.from.toISOString(), to: dateRange.to.toISOString() })); } catch {}
+  }, [dateRange]);
+
+  // Persist other filters
+  const filtersMountedRef = useRef(false);
+  useEffect(() => {
+    if (!filtersMountedRef.current) { filtersMountedRef.current = true; return; }
+    try {
+      localStorage.setItem('adperf_activeTab', activeTab);
+      localStorage.setItem('adperf_activeOnly', String(activeOnly));
+      localStorage.setItem('adperf_sortKey', sortKey);
+      localStorage.setItem('adperf_sortDir', sortDir);
+    } catch {}
+  }, [activeTab, activeOnly, sortKey, sortDir]);
+
   // Fetch data
   const fetchData = useCallback(async () => {
     setLoading(true);
