@@ -9,6 +9,9 @@ const PUBLIC_PATHS = [
   '/login',
   '/api/auth/login',
   '/favicon.ico',
+  '/auth/meta/callback',   // Meta OAuth callback — must be public or code is lost
+  '/privacy',              // Public pages for Meta App Review
+  '/terms',
 ];
 
 // Paths that use their own auth (cron secret)
