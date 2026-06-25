@@ -1,27 +1,28 @@
 export const metadata = {
-  title: 'Terms of Service — AD Account',
-  description: 'Terms of Service for AD Account Meta Ads Manager',
+  title: 'Terms of Service — Add ERP',
+  description: 'Terms of Service for Add ERP Meta Ads Manager',
 };
 
 export default function TermsPage() {
   return (
     <main style={{ maxWidth: '800px', margin: '0 auto', padding: '60px 24px', fontFamily: 'system-ui, sans-serif', color: '#1a1a1a', lineHeight: '1.7' }}>
       <h1 style={{ fontSize: '2rem', fontWeight: '700', marginBottom: '8px' }}>Terms of Service</h1>
-      <p style={{ color: '#666', marginBottom: '40px' }}>Last updated: June 2025</p>
+      <p style={{ color: '#666', marginBottom: '40px' }}>Last updated: June 2026</p>
 
       <section style={{ marginBottom: '32px' }}>
         <h2 style={{ fontSize: '1.25rem', fontWeight: '600', marginBottom: '12px' }}>1. Acceptance of Terms</h2>
-        <p>By accessing or using AD Account ("the app") at shiptrack.store, you agree to be bound by these Terms of Service. If you do not agree, please do not use the application.</p>
+        <p>By accessing or using Add ERP ("the app") at <strong>krvvy.info</strong>, you agree to be bound by these Terms of Service. If you do not agree, please do not use the application.</p>
       </section>
 
       <section style={{ marginBottom: '32px' }}>
         <h2 style={{ fontSize: '1.25rem', fontWeight: '600', marginBottom: '12px' }}>2. Description of Service</h2>
-        <p>AD Account is a private Meta Ads management dashboard that allows authorized users to:</p>
+        <p>Add ERP is a private Meta Ads management dashboard that allows authorized users to:</p>
         <ul style={{ paddingLeft: '24px', marginTop: '8px' }}>
           <li>View and manage Facebook and Instagram ad campaigns</li>
           <li>Monitor ad performance metrics and analytics</li>
-          <li>Set up automated rules for ad management</li>
+          <li>Set up automated rules for ad management (pause/resume based on conditions)</li>
           <li>Manage Page comments and inbox messages</li>
+          <li>Access business portfolio and ad account data</li>
         </ul>
       </section>
 
@@ -48,6 +49,7 @@ export default function TermsPage() {
           <li>All actions taken through your account</li>
           <li>Ensuring your ad campaigns comply with Meta's advertising policies</li>
           <li>Any consequences resulting from automated rules you configure</li>
+          <li>Monitoring ad spend affected by automation rules</li>
         </ul>
       </section>
 
@@ -69,7 +71,8 @@ export default function TermsPage() {
       <section style={{ marginBottom: '32px' }}>
         <h2 style={{ fontSize: '1.25rem', fontWeight: '600', marginBottom: '12px' }}>9. Contact</h2>
         <p>For questions about these Terms, contact:<br />
-        <a href="mailto:aadityaaggarwal3526@gmail.com" style={{ color: '#1877f2' }}>aadityaaggarwal3526@gmail.com</a></p>
+        <a href="mailto:cargonicshop@gmail.com" style={{ color: '#1877f2' }}>cargonicshop@gmail.com</a></p>
+        <p style={{ marginTop: '8px' }}>Website: <a href="https://www.krvvy.info" style={{ color: '#1877f2' }}>www.krvvy.info</a></p>
       </section>
     </main>
   );
