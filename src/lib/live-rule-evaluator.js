@@ -195,8 +195,13 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
     checked++;
     const isPausedByUs = !!pausedMap[entityId];
 
-    // Min spend guard: skip low-spend unless WE paused it (resume check still needed)
-    if (entity.spend < minSpend && !isPausedByUs) {
+    // ── MIN SPEND GUARD ──────────────────────────────────────────────────────
+    // Skip low-spend ads to avoid false positives on brand new ads.
+    // EXCEPTION: if spend > $0 AND results = 0 → always evaluate.
+    //   "Spent any money, got zero conversions" must ALWAYS trigger — regardless
+    //   of spend amount. The min-spend guard was blocking these exact ads.
+    const spendingWithZeroResults = entity.spend > 0 && entity.results === 0;
+    if (entity.spend < minSpend && !isPausedByUs && !spendingWithZeroResults) {
       skippedMinSpend++;
       continue;
     }
