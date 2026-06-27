@@ -6,11 +6,13 @@ import { getSupabaseServer } from '@/lib/supabase-server';
 // Called by CRON every 60 seconds. Fetches live Meta data and evaluates ad rules.
 //
 // CRON SETUP (cron-job.org — free):
-//   URL: https://shiptrack.store/api/automation/live-evaluate
+//   URL: https://www.krvvy.info/api/automation/live-evaluate
 //   Method: POST
 //   Header: x-cron-secret: YOUR_CRON_SECRET_KEY
 //   Schedule: Every 1 minute
 //
+// Vercel timeout: 300s (set below) — needed for 500+ ads with parallel pauses
+export const maxDuration = 300;
 export async function POST(request) {
   // Auth: cron secret OR manual trigger
   const cronSecret = request.headers.get('x-cron-secret');

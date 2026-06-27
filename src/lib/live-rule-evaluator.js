@@ -35,7 +35,8 @@ const CONVERSION_PRIORITY = [
 ];
 
 // Default minimum spend before rules can fire ($)
-const DEFAULT_MIN_SPEND = 1.00;
+// Lowered to $0.50 so ads spending small amounts today still get evaluated
+const DEFAULT_MIN_SPEND = 0.50;
 
 /**
  * Main entry: fetch live data + evaluate ALL active ad/ad-set level rules
@@ -200,6 +201,12 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
   const minSpend = parseFloat(rule.min_spend_threshold) || DEFAULT_MIN_SPEND;
   const isKillSwitch = rule.action_type === 'kill_switch';
 
+  // ── PASS 1: Classify every entity — NO API calls here ───────
+  // Collecting first then acting in parallel batches is ~15x faster
+  // than sequential await inside the loop (critical for 500+ ads).
+  const toPause = [];   // { entityId, entity }
+  const toResume = [];  // { entityId, entity }
+
   for (const [entityId, entity] of Object.entries(liveData)) {
     // ── Target filtering ────────────────────────────────────
     if (rule.target_external_ids?.length && !rule.target_external_ids.includes(entityId)) {
@@ -210,6 +217,7 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
     const isPausedByUs = !!pausedMap[entityId];
 
     // ── MIN SPEND GUARD ─────────────────────────────────────
+    // Skip low-spend ads UNLESS we already paused them (need to evaluate for resume)
     if (entity.spend < minSpend && !isPausedByUs) {
       skippedMinSpend++;
       continue;
@@ -221,9 +229,8 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
       return evaluateCondition(value, cond.operator, parseFloat(cond.value));
     });
 
-    // ── CASE 1: Conditions met + entity is running → PAUSE IMMEDIATELY ──
     if (allConditionsMet && !isPausedByUs) {
-      // Track ALL breaching ads for diagnostics
+      // Track ALL breaching ads for diagnostics (including non-ACTIVE)
       breachingAds.push({
         id: entityId,
         name: entity.entityName,
@@ -238,84 +245,86 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
         continue;
       }
 
-      // ── EXECUTE PAUSE ───────────────────────────────────
-      try {
-        await retryWithBackoff(() => pauseEntity(entityId, entity.accessToken));
+      toPause.push({ entityId, entity });
 
-        // RELIABLE TRACKING: delete any old rows, then insert fresh
-        // (avoids partial unique index issues with upsert)
-        await supabase.from('automation_paused_ads')
-          .delete()
-          .eq('ad_external_id', entityId);
-
-        await supabase.from('automation_paused_ads').insert({
-          ad_external_id: entityId,
-          ad_name: entity.entityName,
-          rule_id: rule.id,
-          rule_name: rule.name,
-          reason: isKillSwitch ? 'kill_switch' : 'threshold',
-          metric_snapshot: buildSnapshot(entity),
-          paused_at: new Date().toISOString(),
-          resumed_at: null,
-          is_paused: true,
-        });
-
-        await logLiveAction(supabase, rule, entityId, entity, 'paused');
-        paused++;
-
-        // ── UPDATE TRIGGER COUNT on the rule ────────────────
-        await supabase.from('automation_rules')
-          .update({
-            trigger_count: (rule.trigger_count || 0) + paused,
-            last_triggered_at: new Date().toISOString(),
-          })
-          .eq('id', rule.id);
-
-        console.log(
-          `[LiveMonitor] ⏸️  PAUSED ${rule.scope} "${entity.entityName}" ` +
-          `(CPR: $${entity.cpr?.toFixed(2)}, CPC: $${entity.cpc?.toFixed(2)}, Spend: $${entity.spend?.toFixed(2)})`
-        );
-      } catch (err) {
-        console.error(`[LiveMonitor] Failed to pause ${entityId}:`, err.message);
-        failedPauses.push({ id: entityId, name: entity.entityName, error: err.message });
-        try {
-          await logLiveAction(supabase, rule, entityId, entity, 'failed', err.message);
-        } catch {}
-      }
-
-    // ── CASE 2: Conditions NO LONGER met + WE paused it → RESUME IMMEDIATELY ──
-    } else if (!allConditionsMet && isPausedByUs) {
-      if (isKillSwitch) continue;
-
+    } else if (!allConditionsMet && isPausedByUs && !isKillSwitch) {
       const pauseRecord = pausedMap[entityId];
       if (pauseRecord.rule_id !== rule.id) continue;
-
-      try {
-        await retryWithBackoff(() => enableEntity(entityId, entity.accessToken));
-
-        await supabase.from('automation_paused_ads')
-          .update({
-            is_paused: false,
-            resumed_at: new Date().toISOString(),
-          })
-          .eq('ad_external_id', entityId)
-          .eq('is_paused', true);
-
-        await logLiveAction(supabase, rule, entityId, entity, 'resumed');
-        resumed++;
-
-        console.log(
-          `[LiveMonitor] ▶️  RESUMED ${rule.scope} "${entity.entityName}" ` +
-          `(CPR: $${entity.cpr?.toFixed(2)}, CPC: $${entity.cpc?.toFixed(2)}, Spend: $${entity.spend?.toFixed(2)})`
-        );
-      } catch (err) {
-        console.error(`[LiveMonitor] Failed to resume ${entityId}:`, err.message);
-        try {
-          await logLiveAction(supabase, rule, entityId, entity, 'failed', err.message);
-        } catch {}
-      }
+      toResume.push({ entityId, entity });
     }
   }
+
+  // ── PASS 2: Execute PAUSES in parallel batches of 15 ────────
+  // Sequential: 50 pauses × 2s = 100s → TIMEOUT
+  // Parallel batches: ceil(50/15) × 2s = 8s  ✓
+  const BATCH_SIZE = 15;
+
+  await parallelBatch(toPause, BATCH_SIZE, async ({ entityId, entity }) => {
+    try {
+      await retryWithBackoff(() => pauseEntity(entityId, entity.accessToken));
+
+      await supabase.from('automation_paused_ads')
+        .delete()
+        .eq('ad_external_id', entityId);
+
+      await supabase.from('automation_paused_ads').insert({
+        ad_external_id: entityId,
+        ad_name: entity.entityName,
+        rule_id: rule.id,
+        rule_name: rule.name,
+        reason: isKillSwitch ? 'kill_switch' : 'threshold',
+        metric_snapshot: buildSnapshot(entity),
+        paused_at: new Date().toISOString(),
+        resumed_at: null,
+        is_paused: true,
+      });
+
+      await logLiveAction(supabase, rule, entityId, entity, 'paused');
+      paused++;
+
+      console.log(
+        `[LiveMonitor] ⏸️  PAUSED ${rule.scope} "${entity.entityName}" ` +
+        `(CPR: $${entity.cpr?.toFixed(2)}, Spend: $${entity.spend?.toFixed(2)}, Results: ${entity.results})`
+      );
+    } catch (err) {
+      console.error(`[LiveMonitor] Failed to pause ${entityId}:`, err.message);
+      failedPauses.push({ id: entityId, name: entity.entityName, error: err.message });
+      try { await logLiveAction(supabase, rule, entityId, entity, 'failed', err.message); } catch {}
+    }
+  });
+
+  // Update trigger count once after all pauses (not per-pause)
+  if (paused > 0) {
+    await supabase.from('automation_rules')
+      .update({
+        trigger_count: (rule.trigger_count || 0) + paused,
+        last_triggered_at: new Date().toISOString(),
+      })
+      .eq('id', rule.id);
+  }
+
+  // ── PASS 3: Execute RESUMES in parallel batches of 15 ───────
+  await parallelBatch(toResume, BATCH_SIZE, async ({ entityId, entity }) => {
+    try {
+      await retryWithBackoff(() => enableEntity(entityId, entity.accessToken));
+
+      await supabase.from('automation_paused_ads')
+        .update({ is_paused: false, resumed_at: new Date().toISOString() })
+        .eq('ad_external_id', entityId)
+        .eq('is_paused', true);
+
+      await logLiveAction(supabase, rule, entityId, entity, 'resumed');
+      resumed++;
+
+      console.log(
+        `[LiveMonitor] ▶️  RESUMED ${rule.scope} "${entity.entityName}" ` +
+        `(CPR: $${entity.cpr?.toFixed(2)}, Spend: $${entity.spend?.toFixed(2)})`
+      );
+    } catch (err) {
+      console.error(`[LiveMonitor] Failed to resume ${entityId}:`, err.message);
+      try { await logLiveAction(supabase, rule, entityId, entity, 'failed', err.message); } catch {}
+    }
+  });
 
   return {
     paused, resumed, skippedMinSpend, checked,
@@ -325,6 +334,22 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
   };
 }
 
+
+// =============================================================
+// PARALLEL BATCH HELPER
+// =============================================================
+/**
+ * Run async operations in parallel batches.
+ * Prevents overwhelming Meta API while still being fast.
+ * Example: 50 pauses with batchSize=15 → 4 batches × ~2s = 8s total
+ * vs. sequential 50 × 2s = 100s.
+ */
+async function parallelBatch(items, batchSize, fn) {
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    await Promise.all(batch.map(fn));
+  }
+}
 
 // =============================================================
 // COOLDOWN — REMOVED (Zero Cooldown Policy)
