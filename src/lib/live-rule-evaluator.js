@@ -245,6 +245,21 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
       try {
         await supabase.from('automation_logs').insert(buildLogRow(rule, entityId, entity, 'failed', error));
       } catch {}
+      // If the ad no longer exists on Meta (deleted), remove it from paused tracking
+      // so we stop retrying it on every cron run
+      const isDeleted = error && (
+        error.includes('does not exist') ||
+        error.includes('cannot be loaded due to missing permissions') ||
+        error.includes('Object with ID')
+      );
+      if (isDeleted) {
+        try {
+          await supabase.from('automation_paused_ads')
+            .delete()
+            .eq('ad_external_id', entityId);
+          console.log(`[LiveMonitor] Removed deleted/inaccessible ad from tracking: ${entityId}`);
+        } catch {}
+      }
     }
   }
 
