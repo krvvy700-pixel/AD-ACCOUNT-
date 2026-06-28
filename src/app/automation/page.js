@@ -499,7 +499,10 @@ function AutomationContent() {
                         )}
                         {log.is_reversed && <span className="text-xs text-muted-foreground">↩ Reversed</span>}
                         {log.status === 'failed' && log.error_message && (
-                          <span className="text-xs text-destructive" title={log.error_message}>⚠ Error</span>
+                          <div className="text-xs text-destructive max-w-[200px]">
+                            <span className="font-semibold">⚠ Error:</span>
+                            <span className="ml-1 break-words">{log.error_message}</span>
+                          </div>
                         )}
                       </td>
                     </tr>
