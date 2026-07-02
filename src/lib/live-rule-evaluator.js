@@ -75,52 +75,47 @@ export async function evaluateLiveRules() {
     pausedMap[p.ad_external_id] = p;
   }
 
-  // ── Determine what levels we need ──────────────────────────
-  const needsAdData    = rules.some(r => r.scope === 'ad');
-  const needsAdSetData = rules.some(r => r.scope === 'ad_set');
+  // ── Cache for live data fetches by scope and period ────────
+  const liveDataCache = {};
+  const checkedEntities = new Set();
 
-  // ── Fetch LIVE data — all accounts in parallel ─────────────
-  const liveAdData    = {};
-  const liveAdSetData = {};
+  async function getLiveDataForScopeAndPeriod(scope, period) {
+    const cacheKey = `${scope}_${period}`;
+    if (liveDataCache[cacheKey]) return liveDataCache[cacheKey];
 
-  await Promise.all(accounts.map(async (account) => {
-    try {
-      const fetches = [];
+    const dataMap = {};
+    const type = scope === 'ad' ? 'ads' : 'adsets';
+    const insightsLevel = scope === 'ad' ? 'ad' : 'adset';
 
-      if (needsAdData) {
-        fetches.push(
-          Promise.all([
-            fetchAllLiveInsights(account.meta_account_id, account.access_token, 'ad'),
-            fetchEntityStatuses(account.meta_account_id, account.access_token, 'ads'),
-          ]).then(([insights, statuses]) => {
-            mergeInsightsAndStatuses(insights, statuses, liveAdData, account);
-          })
-        );
+    await Promise.all(accounts.map(async (account) => {
+      try {
+        const [insights, statuses] = await Promise.all([
+          fetchAllLiveInsights(account.meta_account_id, account.access_token, insightsLevel, period),
+          fetchEntityStatuses(account.meta_account_id, account.access_token, type),
+        ]);
+        mergeInsightsAndStatuses(insights, statuses, dataMap, account);
+      } catch (err) {
+        console.error(`[LiveMonitor] Failed to fetch for ${account.name} (${scope}, ${period}):`, err.message);
       }
+    }));
 
-      if (needsAdSetData) {
-        fetches.push(
-          Promise.all([
-            fetchAllLiveInsights(account.meta_account_id, account.access_token, 'adset'),
-            fetchEntityStatuses(account.meta_account_id, account.access_token, 'adsets'),
-          ]).then(([insights, statuses]) => {
-            mergeInsightsAndStatuses(insights, statuses, liveAdSetData, account);
-          })
-        );
-      }
-
-      await Promise.all(fetches);
-    } catch (err) {
-      console.error(`[LiveMonitor] Failed to fetch for ${account.name}:`, err.message);
-    }
-  }));
+    liveDataCache[cacheKey] = dataMap;
+    return dataMap;
+  }
 
   // ── Evaluate each rule ─────────────────────────────────────
   const results = [];
 
   for (const rule of rules) {
     try {
-      const dataMap = rule.scope === 'ad' ? liveAdData : liveAdSetData;
+      const period = rule.conditions?.[0]?.period || 'today';
+      const dataMap = await getLiveDataForScopeAndPeriod(rule.scope, period);
+
+      // Record which entities were checked
+      for (const entityId of Object.keys(dataMap)) {
+        checkedEntities.add(`${rule.scope}_${entityId}`);
+      }
+
       const ruleResults = await evaluateRuleAgainstLiveData(supabase, rule, dataMap, pausedMap);
       results.push({ rule: rule.name, ruleId: rule.id, scope: rule.scope, ...ruleResults });
     } catch (err) {
@@ -136,7 +131,7 @@ export async function evaluateLiveRules() {
 
   console.log(
     `[LiveMonitor] Done in ${elapsed}ms — ` +
-    `${Object.keys(liveAdData).length} ads, ${Object.keys(liveAdSetData).length} ad-sets | ` +
+    `${checkedEntities.size} unique entities evaluated across ${rules.length} rules | ` +
     `${totalPaused} paused, ${totalResumed} resumed, ${totalSkipped} skipped`
   );
 
@@ -152,7 +147,7 @@ export async function evaluateLiveRules() {
   }
 
   return {
-    evaluated: Object.keys(liveAdData).length + Object.keys(liveAdSetData).length,
+    evaluated: checkedEntities.size,
     rules: rules.length,
     paused: totalPaused,
     resumed: totalResumed,
@@ -513,24 +508,46 @@ function mergeInsightsAndStatuses(insights, statuses, dataMap, account) {
 }
 
 /**
- * Fetch today's insights — ONLY for entities with spend > 0.
- * The spend filter dramatically reduces pages fetched for large accounts.
- * (5000 ads but only 200 spending today → 1 page instead of 10)
+ * Helper to calculate start and end dates for a given period in IST.
  */
-async function fetchAllLiveInsights(accountId, accessToken, level = 'ad') {
-  // IST timezone (UTC+5:30) — matches user's timezone and Meta account
-  const now   = new Date();
+function getDateRangeForPeriod(period) {
+  const now = new Date();
   const istMs = now.getTime() + (5.5 * 60 * 60 * 1000);
-  const today = new Date(istMs).toISOString().split('T')[0];
+  const todayStr = new Date(istMs).toISOString().split('T')[0];
+
+  if (period === 'today') {
+    return { since: todayStr, until: todayStr };
+  }
+  
+  if (period === 'yesterday') {
+    const yesterday = new Date(istMs - (24 * 60 * 60 * 1000)).toISOString().split('T')[0];
+    return { since: yesterday, until: yesterday };
+  }
+
+  let days = 1;
+  if (period === 'last_3_days') days = 3;
+  else if (period === 'last_7_days') days = 7;
+  else if (period === 'last_14_days') days = 14;
+  else if (period === 'last_30_days') days = 30;
+
+  const sinceDate = new Date(istMs - ((days - 1) * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
+  return { since: sinceDate, until: todayStr };
+}
+
+/**
+ * Fetch insights for a given level and period — ONLY for entities with spend > 0.
+ * The spend filter dramatically reduces pages fetched for large accounts.
+ */
+async function fetchAllLiveInsights(accountId, accessToken, level = 'ad', period = 'today') {
+  const { since, until } = getDateRangeForPeriod(period);
 
   const idField   = level === 'ad' ? 'ad_id'    : 'adset_id';
   const nameField = level === 'ad' ? 'ad_name'  : 'adset_name';
 
   const fields    = `${idField},${nameField},spend,impressions,clicks,actions`;
-  const timeRange = encodeURIComponent(JSON.stringify({ since: today, until: today }));
+  const timeRange = encodeURIComponent(JSON.stringify({ since, until }));
 
-  // SPEND FILTER: only fetch entities that have spent money today.
-  // Zero-spend ads are covered by fetchEntityStatuses + mergeInsightsAndStatuses.
+  // SPEND FILTER: only fetch entities that have spent money in the period.
   const spendFilter = encodeURIComponent(
     JSON.stringify([{ field: 'spend', operator: 'GREATER_THAN', value: '0' }])
   );
@@ -587,7 +604,11 @@ async function fetchEntityStatuses(accountId, accessToken, type = 'ads') {
 
   while (url) {
     const res = await fetch(url);
-    if (!res.ok) return map; // Don't crash on status fetch failure — degrade gracefully
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      console.error(`[LiveMonitor] fetchEntityStatuses failed for ${type}: ${res.status}`, err);
+      return map; // Don't crash on status fetch failure — degrade gracefully
+    }
     const json = await res.json();
     for (const entity of (json.data || [])) {
       map[entity.id] = { status: entity.status, name: entity.name };

@@ -3,6 +3,7 @@
 -- for comment moderation across ALL pages
 -- =============================================
 
+
 CREATE TABLE IF NOT EXISTS page_tokens (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   page_id TEXT NOT NULL UNIQUE,

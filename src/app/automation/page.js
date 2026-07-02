@@ -540,6 +540,7 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
   const isLiveScope = scope === 'ad' || scope === 'ad_set';
   const [budgetAmount, setBudgetAmount] = useState(rule?.action_params?.amount || '');
   const [saving, setSaving] = useState(false);
+  const [targetType, setTargetType] = useState(rule?.target_external_ids && rule.target_external_ids.length > 0 ? 'specific' : 'all');
 
   // Multi-ad picker state
   const [allAds, setAllAds] = useState([]);
@@ -589,7 +590,10 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
     const filtered = getFilteredAds();
     setSelectedExternalIds(prev => {
       const next = new Set(prev);
-      for (const ad of filtered) next.add(ad.externalId);
+      for (const ad of filtered) {
+        const id = scope === 'ad_set' ? ad.adsetId : ad.externalId;
+        if (id) next.add(id);
+      }
       return next;
     });
   };
@@ -606,12 +610,22 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
     );
   };
 
-  // Group ads by account
+  // Group ads or ad sets by account, filtering duplicates for ad_set scope
   const groupedAds = () => {
     const filtered = getFilteredAds();
     const groups = {};
+    const seenIds = new Set();
+    
     for (const ad of filtered) {
       const key = ad.accountName || 'Unknown Account';
+      const id = scope === 'ad_set' ? ad.adsetId : ad.externalId;
+      if (!id) continue;
+      
+      if (scope === 'ad_set') {
+        if (seenIds.has(id)) continue;
+        seenIds.add(id);
+      }
+      
       if (!groups[key]) groups[key] = [];
       groups[key].push(ad);
     }
@@ -635,7 +649,7 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
       max_triggers_per_day: maxTriggers,
       min_spend_threshold: parseFloat(minSpend) || 1,
       dry_run: dryRun,
-      target_external_ids: selectedExternalIds.size > 0 ? [...selectedExternalIds] : null,
+      target_external_ids: targetType === 'specific' && selectedExternalIds.size > 0 ? [...selectedExternalIds] : null,
     };
     if (rule?.id) body.id = rule.id;
 
@@ -673,109 +687,159 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
             </div>
 
             {/* Multi-Ad Picker */}
-            {isLiveScope && (
-              <div>
-                <label className="block text-xs font-medium text-muted-foreground uppercase mb-1.5">
-                  Target Ads
-                  <span className="text-[10px] font-normal ml-1 text-muted-foreground">
-                    ({selectedExternalIds.size > 0 ? `${selectedExternalIds.size} selected` : 'All ads — select specific ones below'})
-                  </span>
-                </label>
+            {isLiveScope && (() => {
+              const scopeLabelSingular = scope === 'ad' ? 'ad' : scope === 'ad_set' ? 'ad set' : 'entity';
+              const scopeLabelPlural = scope === 'ad' ? 'ads' : scope === 'ad_set' ? 'ad sets' : 'entities';
+              const scopeLabelCapitalized = scope === 'ad' ? 'Ads' : scope === 'ad_set' ? 'Ad Sets' : 'Entities';
 
-                <button
-                  onClick={() => setAdPickerOpen(!adPickerOpen)}
-                  className={`w-full flex items-center justify-between px-3 py-2.5 text-sm border rounded-lg transition-colors ${
-                    selectedExternalIds.size > 0
-                      ? 'border-primary/40 bg-primary/5 text-foreground'
-                      : 'border-border bg-surface text-muted-foreground hover:bg-muted'
-                  }`}
-                >
-                  <span className="flex items-center gap-2">
-                    <CheckSquare size={14} />
-                    {selectedExternalIds.size > 0
-                      ? `${selectedExternalIds.size} ads selected across accounts`
-                      : 'All ads (click to select specific ads)'
-                    }
-                  </span>
-                  <ChevronDown size={14} className={`transition-transform ${adPickerOpen ? 'rotate-180' : ''}`} />
-                </button>
-
-                {adPickerOpen && (
-                  <div className="mt-2 border border-border rounded-lg bg-surface shadow-elevated max-h-[300px] flex flex-col overflow-hidden animate-fade-in">
-                    {/* Search + actions */}
-                    <div className="p-2 border-b border-border flex items-center gap-2">
-                      <div className="relative flex-1">
-                        <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                        <input
-                          value={adSearch} onChange={e => setAdSearch(e.target.value)}
-                          placeholder="Search ads, campaigns, accounts..."
-                          className="w-full pl-8 pr-3 py-1.5 text-xs border border-border rounded-md bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary/30"
-                          autoFocus
-                        />
+              return (
+                <div className="space-y-3">
+                  <label className="block text-xs font-medium text-muted-foreground uppercase">
+                    Target {scopeLabelCapitalized}
+                  </label>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div
+                      onClick={() => { setTargetType('all'); setAdPickerOpen(false); }}
+                      className={`flex flex-col p-3 rounded-xl border text-left cursor-pointer transition-all duration-200 ${
+                        targetType === 'all'
+                          ? 'border-primary bg-primary/5 ring-1 ring-primary'
+                          : 'border-border bg-surface hover:bg-muted/40'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <Zap size={14} className={targetType === 'all' ? 'text-primary' : 'text-muted-foreground'} />
+                        <span className="text-xs font-semibold text-foreground">All {scopeLabelCapitalized}</span>
                       </div>
-                      <button onClick={selectAllAds} className="text-[10px] text-primary font-medium hover:underline whitespace-nowrap">Select All</button>
-                      <button onClick={deselectAllAds} className="text-[10px] text-muted-foreground hover:underline whitespace-nowrap">Clear</button>
+                      <p className="text-[10px] text-muted-foreground leading-relaxed">
+                        Automatically runs on all active {scopeLabelPlural}, including new ones you add in the future.
+                      </p>
                     </div>
 
-                    {/* Ad list */}
-                    <div className="overflow-y-auto flex-1">
-                      {adsLoading ? (
-                        <div className="flex items-center justify-center py-8">
-                          <Loader2 size={16} className="animate-spin text-primary mr-2" />
-                          <span className="text-xs text-muted-foreground">Loading ads from Meta...</span>
-                        </div>
-                      ) : Object.entries(groupedAds()).length === 0 ? (
-                        <div className="text-xs text-muted-foreground text-center py-6">
-                          {adSearch ? 'No ads match your search' : 'No ads found'}
-                        </div>
-                      ) : (
-                        Object.entries(groupedAds()).map(([accountName, ads]) => (
-                          <div key={accountName}>
-                            <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-muted-foreground bg-muted/50 sticky top-0">
-                              {accountName}
-                              <span className="ml-1 font-normal text-muted-foreground/70">({ads.length} ads)</span>
-                            </div>
-                            {ads.map(ad => (
-                              <label
-                                key={ad.externalId}
-                                className={`flex items-center gap-2.5 px-3 py-2 text-sm hover:bg-muted/50 cursor-pointer transition-colors ${
-                                  selectedExternalIds.has(ad.externalId) ? 'bg-primary/5' : ''
-                                }`}
-                              >
-                                <input
-                                  type="checkbox"
-                                  checked={selectedExternalIds.has(ad.externalId)}
-                                  onChange={() => toggleAdSelection(ad.externalId)}
-                                  className="w-3.5 h-3.5 rounded border-border accent-primary"
-                                />
-                                {ad.thumbnailUrl ? (
-                                  <img src={ad.thumbnailUrl} alt="" className="w-7 h-7 rounded object-cover border border-border flex-shrink-0" />
-                                ) : (
-                                  <div className="w-7 h-7 rounded bg-muted flex items-center justify-center flex-shrink-0">
-                                    <Image size={10} className="text-muted-foreground" />
-                                  </div>
-                                )}
-                                <div className="flex-1 min-w-0">
-                                  <div className="truncate text-xs font-medium">{ad.name}</div>
-                                  <div className="text-[10px] text-muted-foreground flex items-center gap-1">
-                                    <span>{ad.campaignName}</span>
-                                    <span className={`px-1 rounded text-[9px] ${
-                                      ad.status === 'ACTIVE' ? 'bg-success/10 text-success'
-                                      : ad.status === 'PAUSED' ? 'bg-warning/10 text-warning'
-                                      : 'bg-muted text-muted-foreground'
-                                    }`}>{ad.status}</span>
-                                  </div>
-                                </div>
-                              </label>
-                            ))}
-                          </div>
-                        ))
-                      )}
+                    <div
+                      onClick={() => setTargetType('specific')}
+                      className={`flex flex-col p-3 rounded-xl border text-left cursor-pointer transition-all duration-200 ${
+                        targetType === 'specific'
+                          ? 'border-primary bg-primary/5 ring-1 ring-primary'
+                          : 'border-border bg-surface hover:bg-muted/40'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <CheckSquare size={14} className={targetType === 'specific' ? 'text-primary' : 'text-muted-foreground'} />
+                        <span className="text-xs font-semibold text-foreground">Specific {scopeLabelCapitalized}</span>
+                      </div>
+                      <p className="text-[10px] text-muted-foreground leading-relaxed">
+                        Only run this rule on specific {scopeLabelPlural} that you manually select from the list.
+                      </p>
                     </div>
                   </div>
-                )}
-              </div>
-            )}
+
+                  {targetType === 'specific' && (
+                    <div className="animate-fade-in space-y-2 mt-2">
+                      <button
+                        onClick={() => setAdPickerOpen(!adPickerOpen)}
+                        className={`w-full flex items-center justify-between px-3 py-2.5 text-sm border rounded-lg transition-colors ${
+                          selectedExternalIds.size > 0
+                            ? 'border-primary/40 bg-primary/5 text-foreground'
+                            : 'border-border bg-surface text-muted-foreground hover:bg-muted'
+                        }`}
+                      >
+                        <span className="flex items-center gap-2">
+                          <CheckSquare size={14} />
+                          {selectedExternalIds.size > 0
+                            ? `${selectedExternalIds.size} ${selectedExternalIds.size === 1 ? scopeLabelSingular : scopeLabelPlural} selected`
+                            : `Select specific ${scopeLabelPlural}...`
+                          }
+                        </span>
+                        <ChevronDown size={14} className={`transition-transform ${adPickerOpen ? 'rotate-180' : ''}`} />
+                      </button>
+
+                      {adPickerOpen && (
+                        <div className="border border-border rounded-lg bg-surface shadow-elevated max-h-[300px] flex flex-col overflow-hidden animate-fade-in">
+                          {/* Search + actions */}
+                          <div className="p-2 border-b border-border flex items-center gap-2">
+                            <div className="relative flex-1">
+                              <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                              <input
+                                value={adSearch} onChange={e => setAdSearch(e.target.value)}
+                                placeholder={`Search ${scopeLabelPlural}, campaigns, accounts...`}
+                                className="w-full pl-8 pr-3 py-1.5 text-xs border border-border rounded-md bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary/30"
+                                autoFocus
+                              />
+                            </div>
+                            <button onClick={selectAllAds} className="text-[10px] text-primary font-medium hover:underline whitespace-nowrap">Select All</button>
+                            <button onClick={deselectAllAds} className="text-[10px] text-muted-foreground hover:underline whitespace-nowrap">Clear</button>
+                          </div>
+
+                          {/* Ad list */}
+                          <div className="overflow-y-auto flex-1">
+                            {adsLoading ? (
+                              <div className="flex items-center justify-center py-8">
+                                <Loader2 size={16} className="animate-spin text-primary mr-2" />
+                                <span className="text-xs text-muted-foreground">Loading {scopeLabelPlural} from Meta...</span>
+                              </div>
+                            ) : Object.entries(groupedAds()).length === 0 ? (
+                              <div className="text-xs text-muted-foreground text-center py-6">
+                                {adSearch ? `No ${scopeLabelPlural} match your search` : `No ${scopeLabelPlural} found`}
+                              </div>
+                            ) : (
+                              Object.entries(groupedAds()).map(([accountName, ads]) => (
+                                <div key={accountName}>
+                                  <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-muted-foreground bg-muted/50 sticky top-0">
+                                    {accountName}
+                                    <span className="ml-1 font-normal text-muted-foreground/70">({ads.length} {scopeLabelPlural})</span>
+                                  </div>
+                                  {ads.map(ad => {
+                                    const targetId = scope === 'ad_set' ? ad.adsetId : ad.externalId;
+                                    const targetName = scope === 'ad_set' ? ad.adsetName : ad.name;
+                                    if (!targetId) return null;
+
+                                    return (
+                                      <label
+                                        key={ad.externalId}
+                                        className={`flex items-center gap-2.5 px-3 py-2 text-sm hover:bg-muted/50 cursor-pointer transition-colors ${
+                                          selectedExternalIds.has(targetId) ? 'bg-primary/5' : ''
+                                        }`}
+                                      >
+                                        <input
+                                          type="checkbox"
+                                          checked={selectedExternalIds.has(targetId)}
+                                          onChange={() => toggleAdSelection(targetId)}
+                                          className="w-3.5 h-3.5 rounded border-border accent-primary"
+                                        />
+                                        {ad.thumbnailUrl && scope === 'ad' ? (
+                                          <img src={ad.thumbnailUrl} alt="" className="w-7 h-7 rounded object-cover border border-border flex-shrink-0" />
+                                        ) : (
+                                          <div className="w-7 h-7 rounded bg-muted flex items-center justify-center flex-shrink-0">
+                                            <Image size={10} className="text-muted-foreground" />
+                                          </div>
+                                        )}
+                                        <div className="flex-1 min-w-0">
+                                          <div className="truncate text-xs font-medium">{targetName}</div>
+                                          <div className="text-[10px] text-muted-foreground flex items-center gap-1">
+                                            <span>{ad.campaignName}</span>
+                                            {scope === 'ad' && (
+                                              <span className={`px-1 rounded text-[9px] ${
+                                                ad.status === 'ACTIVE' ? 'bg-success/10 text-success'
+                                                : ad.status === 'PAUSED' ? 'bg-warning/10 text-warning'
+                                                : 'bg-muted text-muted-foreground'
+                                              }`}>{ad.status}</span>
+                                            )}
+                                          </div>
+                                        </div>
+                                      </label>
+                                    );
+                                  })}
+                                </div>
+                              ))
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             <div>
               <label className="block text-xs font-medium text-muted-foreground uppercase mb-1.5">Conditions (ALL must match)</label>
